@@ -151,30 +151,46 @@ At [appleid.apple.com](https://appleid.apple.com) go to **Sign-In and Security �
 ### 2. Deploy it
 
 #### Free, on Cloudflare Workers (recommended)
-The `worker/` folder is the same connector written for [Cloudflare Workers](https://developers.cloudflare.com/workers/): same tools, same sign-in page. The free plan is plenty for one person (100,000 requests a day) and needs no card. You need Node.js 22 or newer.
+The `worker/` folder is the same connector written for [Cloudflare Workers](https://developers.cloudflare.com/workers/): same tools, same sign-in page. The free plan is plenty for one person (100,000 requests a day) and needs no card. You don't need a Mac for this, only [Node.js](https://nodejs.org) 22 or newer and [git](https://git-scm.com).
 
-1. Create a free account at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up), then sign in from the terminal:
+1. Get the code:
    ```bash
-   cd worker && npm ci && npx wrangler login
+   git clone https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp.git
+   cd apple-calendar-mcp/worker && npm ci
    ```
-2. Create the storage for sign-ins and paste the `id` it prints into `worker/wrangler.jsonc` (`kv_namespaces`):
+2. Create a free account at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up). Then sign in from the terminal, giving Wrangler only the four permissions this needs (plain `wrangler login` asks for access to your whole account):
    ```bash
-   npx wrangler kv namespace create OAUTH_KV
+   npx wrangler login --use-keyring --scopes account:read user:read workers_scripts:write workers_kv:write
    ```
-   Set your time zone (`TZ`) in the same file.
-3. Add the secrets. Each command asks for the value; it is stored encrypted at Cloudflare and never in a file:
-   ```bash
-   npx wrangler secret put CALDAV_USERNAME     # your Apple ID email
-   npx wrangler secret put CALDAV_PASSWORD     # the app-specific password
-   npx wrangler secret put CONNECTOR_PASSWORD  # a long random string you'll type once when connecting
-   ```
+   `--use-keyring` keeps the token in your OS keychain instead of a plain file.
+3. Set your time zone: `TZ` in `worker/wrangler.jsonc` (an IANA name such as `Europe/Istanbul` or `America/New_York`).
 4. Deploy:
    ```bash
    npx wrangler deploy
    ```
-   It prints your address, `https://apple-calendar-mcp.<your-account>.workers.dev`. Your connector URL is that address plus `/mcp`.
+   The first deploy creates the storage for sign-ins (`OAUTH_KV`) and, if your account has none yet, a `workers.dev` subdomain. It prints your address, `https://apple-calendar-mcp.<your-subdomain>.workers.dev`. Your connector URL is that address plus `/mcp`.
+5. Add the secrets. Each command asks for the value; it is stored encrypted at Cloudflare, can't be read back, and takes effect at once:
+   ```bash
+   npx wrangler secret put CALDAV_USERNAME     # your Apple ID email
+   npx wrangler secret put CALDAV_PASSWORD     # the app-specific password from step 1 above
+   npx wrangler secret put CONNECTOR_PASSWORD  # a new random password, 12+ characters; you'll type it once when connecting
+   ```
+   To make the connector password without it ever showing on screen (macOS; it lands in your clipboard for your password manager):
+   ```bash
+   openssl rand -hex 24 | tr -d '\n' | tee >(pbcopy) | npx wrangler secret put CONNECTOR_PASSWORD
+   ```
+6. Check it: `https://<your address>/healthz` should show `{"ok":true}`. Then sign out of Wrangler:
+   ```bash
+   npx wrangler logout
+   ```
 
-To update later, `git pull` and run `npx wrangler deploy` again. `npx wrangler tail` shows live logs.
+**Updating.** Only changes to the code (`worker/src`) or to `wrangler.jsonc` need a deploy: `git pull`, log in as in step 2, `npx wrangler deploy`, log out. Changing a secret needs only `npx wrangler secret put …`.
+
+**Troubleshooting.** `npx wrangler tail` shows the live log (passwords and tokens are never logged).
+- *"This connector isn't set up yet"* (HTTP 503): the log says which setting is missing or invalid. A `CONNECTOR_PASSWORD` that is short or still the example from `.env.example` is refused on purpose.
+- *"The CalDAV server rejected the login"*: `CALDAV_USERNAME` or `CALDAV_PASSWORD` is wrong. Apple shows an app-specific password only once, and revokes all of them when you change your Apple ID password. Create a new one and run `npx wrangler secret put CALDAV_PASSWORD` again. No redeploy or reconnect is needed.
+- *No "App-Specific Passwords" on the Apple page*: turn on two-factor authentication for your Apple ID first. School or work (managed) Apple IDs can't create them.
+- *Claude asks permission before each change*: that's claude.ai confirming tools that change your calendar. You can set the read-only tools to "Always allow" under Settings → Connectors.
 
 #### Or run the Python server yourself
 Configure it:
@@ -224,6 +240,7 @@ In claude.ai: **Settings → Connectors → Add custom connector**. Enter your c
 - Claude gets in only through OAuth. Registration accepts only Claude's own redirect URIs. `http://localhost` (for the MCP Inspector) is allowed only when `PUBLIC_URL` is itself localhost, or with `OAUTH_ALLOW_LOCALHOST=1`.
 - The login page names the site the sign-in will return to, compares the password in constant time, and locks out after repeated failures (5 per IP, 20 overall, per 15 minutes). The server refuses to start with the example password from `.env.example`.
 - Access tokens last 1 hour, refresh tokens 30 days and rotate on every use. If an old refresh token is ever replayed, the whole grant is revoked and you sign in again. Codes and tokens are stored only as SHA-256 hashes in `DATA_DIR/auth.db` (owner-only permissions).
+- On Cloudflare Workers, `/register` and `/authorize` are rate limited per client IP (10 a minute), so scripted abuse can't burn through the free plan's daily KV write quota and block sign-ins.
 - Public endpoints are bounded: a flood of client registrations can't push out a signed-in Claude, and unfinished sign-ins are capped.
 - Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
 - The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
