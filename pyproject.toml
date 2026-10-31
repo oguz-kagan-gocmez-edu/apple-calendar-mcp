@@ -27,8 +27,23 @@ dependencies = [
 [project.scripts]
 apple-calendar-mcp = "apple_calendar_mcp.cli:main"
 
+[project.optional-dependencies]
+remote = [
+    "caldav>=3.7.0",
+    "icalendar>=7.3.0",
+    "recurring-ical-events>=3.8.2",
+    "tzdata>=2026.6",
+]
+
 [dependency-groups]
-dev = ["pytest>=8", "anyio>=4", "ruff>=0.6", "mypy>=1.11", "pytest-cov>=5"]
+dev = [
+    "pytest>=8",
+    "anyio>=4",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest-cov>=5",
+    "radicale>=3.9.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apple_calendar_mcp"]
@@ -45,8 +60,15 @@ target-version = "py311"
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # allow non-ASCII (Turkish) text
 
+[tool.ruff.lint.per-file-ignores]
+"src/apple_calendar_mcp/remote.py" = ["E501"]  # inline HTML/SQL templates
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
 exclude = ["src/apple_calendar_mcp/eventkit_store.py"]  # PyObjC has no type stubs
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["recurring_ical_events"]
+ignore_missing_imports = true
