@@ -17,6 +17,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from apple_calendar_mcp import remote as remote_module
 from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.remote import RemoteConfig, RemoteServer, build_remote
 from apple_calendar_mcp.service import CalendarService
@@ -164,10 +165,49 @@ async def test_unknown_redirect_uri_is_rejected(remote: RemoteServer) -> None:
     assert res.json()["error"] == "invalid_redirect_uri"
 
 
-async def test_localhost_redirect_allowed_for_inspector(remote: RemoteServer) -> None:
+async def test_localhost_redirect_is_off_by_default(remote: RemoteServer) -> None:
     async with http(remote) as client:
         res = await register(client, "http://localhost:6274/oauth/callback")
+    assert res.status_code == 400
+
+
+async def test_localhost_redirect_allowed_for_inspector(tmp_path: Path, clock: Clock) -> None:
+    service = CalendarService(MemoryStore(IST), IST, clock=lambda: NOW)
+    config = RemoteConfig(
+        public_url=BASE, password=PASSWORD, data_dir=tmp_path / "d", allow_localhost_redirects=True
+    )
+    async with http(build_remote(service, config, clock=clock)) as client:
+        res = await register(client, "http://localhost:6274/oauth/callback")
     assert res.status_code == 201
+
+
+async def test_registration_flood_keeps_signed_in_client(
+    remote: RemoteServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_module, "MAX_CLIENTS", 3)
+    async with http(remote) as client:
+        grant = await sign_in(client)
+        for _ in range(10):
+            assert (await register(client)).status_code == 201
+        refreshed = await client.post(
+            "/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": grant["refresh_token"],
+                "client_id": grant["client_id"],
+            },
+        )
+    assert refreshed.status_code == 200, refreshed.text
+
+
+async def test_unfinished_sign_ins_are_capped(remote: RemoteServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote_module, "MAX_PENDING", 3)
+    async with http(remote) as client:
+        for _ in range(8):
+            await start_login(client)
+    with remote.provider.db.tx() as db:
+        (count,) = db.execute("SELECT COUNT(*) FROM pending").fetchone()
+    assert count == 3
 
 
 # ------------------------------------------------------------------ login page
@@ -198,6 +238,43 @@ async def test_login_page_escapes_client_name(remote: RemoteServer) -> None:
     assert "&lt;script&gt;" in page.text
     assert page.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    assert page.headers["x-content-type-options"] == "nosniff"
+    assert "claude.ai" in page.text  # tells the owner where the code goes
+
+
+async def test_login_page_truncates_long_client_name(remote: RemoteServer) -> None:
+    async with http(remote) as client:
+        reg = await client.post(
+            "/register",
+            json={
+                "redirect_uris": [CALLBACK],
+                "client_name": "A" * 5000,
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        _, challenge = pkce()
+        auth = await client.get(
+            "/authorize",
+            params={
+                "response_type": "code",
+                "client_id": reg.json()["client_id"],
+                "redirect_uri": CALLBACK,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+        page = await client.get(auth.headers["location"].removeprefix(BASE))
+    assert "A" * 80 in page.text
+    assert "A" * 81 not in page.text
+
+
+async def test_oversized_login_form_is_refused(remote: RemoteServer) -> None:
+    async with http(remote) as client:
+        _, _, request_id = await start_login(client)
+        res = await client.post(
+            "/login", data={"request": request_id, "password": "x" * 20_000, "action": "allow"}
+        )
+    assert res.status_code == 413
 
 
 async def test_wrong_password_then_rate_limited(remote: RemoteServer) -> None:
@@ -273,6 +350,24 @@ async def test_refresh_rotates_and_revoke_ends_grant(remote: RemoteServer) -> No
             },
         )
         assert reuse.status_code == 400  # old refresh token no longer works
+        # ...and replaying it revoked the whole grant, including the new tokens.
+        stolen = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={"Authorization": f"Bearer {new['access_token']}"},
+        )
+        assert stolen.status_code == 401
+        grant = await sign_in(client)
+        new = (
+            await client.post(
+                "/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": grant["refresh_token"],
+                    "client_id": grant["client_id"],
+                },
+            )
+        ).json()
         revoked = await client.post(  # the SDK's revoke form requires the field, even if empty
             "/revoke",
             data={"token": new["refresh_token"], "client_id": grant["client_id"], "client_secret": ""},
@@ -348,3 +443,23 @@ async def test_wrong_host_header_is_rejected(remote: RemoteServer) -> None:
 def test_config_rejects_weak_password(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="12 characters"):
         RemoteConfig(public_url=BASE, password="short", data_dir=tmp_path)
+
+
+def test_config_rejects_example_password(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="example value"):
+        RemoteConfig(public_url=BASE, password="change-me-to-a-long-random-string", data_dir=tmp_path)
+
+
+def test_config_rejects_url_with_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="without a path"):
+        RemoteConfig(public_url=f"{BASE}/mcp", password=PASSWORD, data_dir=tmp_path)
+
+
+@pytest.mark.parametrize(("url", "expected"), [(BASE, False), ("http://localhost:8000", True)])
+def test_localhost_redirects_default_from_public_url(
+    url: str, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUBLIC_URL", url)
+    monkeypatch.setenv("CONNECTOR_PASSWORD", PASSWORD)
+    monkeypatch.delenv("OAUTH_ALLOW_LOCALHOST", raising=False)
+    assert RemoteConfig.from_env().allow_localhost_redirects is expected

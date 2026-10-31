@@ -177,10 +177,12 @@ Put the `https://….trycloudflare.com` address it prints into `PUBLIC_URL` and 
 In claude.ai: **Settings → Connectors → Add custom connector**. Enter `https://<your server>/mcp`, click **Connect**, and type your `CONNECTOR_PASSWORD` on the page that opens. The connector now appears in your connectors list on web, desktop and mobile.
 
 ### Security notes
-- Claude gets in only through OAuth. Registration accepts only Claude's own redirect URIs (plus `http://localhost` for the MCP Inspector; set `OAUTH_ALLOW_LOCALHOST=0` to turn that off).
-- The login page compares the password in constant time and locks out after repeated failures (5 per IP, 20 overall, per 15 minutes).
-- Access tokens last 1 hour, refresh tokens 30 days and rotate on every use. Codes and tokens are stored only as SHA-256 hashes in `DATA_DIR/auth.db` (owner-only permissions).
+- Claude gets in only through OAuth. Registration accepts only Claude's own redirect URIs. `http://localhost` (for the MCP Inspector) is allowed only when `PUBLIC_URL` is itself localhost, or with `OAUTH_ALLOW_LOCALHOST=1`.
+- The login page names the site the sign-in will return to, compares the password in constant time, and locks out after repeated failures (5 per IP, 20 overall, per 15 minutes). The server refuses to start with the example password from `.env.example`.
+- Access tokens last 1 hour, refresh tokens 30 days and rotate on every use. If an old refresh token is ever replayed, the whole grant is revoked and you sign in again. Codes and tokens are stored only as SHA-256 hashes in `DATA_DIR/auth.db` (owner-only permissions).
+- Public endpoints are bounded: a flood of client registrations can't push out a signed-in Claude, and unfinished sign-ins are capped.
 - Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
+- The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
 - `--read-only` works here too, if you want Claude on the web to only read your calendar.
 
 ### What the remote connector can't see
@@ -198,7 +200,7 @@ npx @modelcontextprotocol/inspector uv run apple-calendar-mcp --backend memory -
 
 ```bash
 uv sync --group dev --extra remote
-uv run pytest --cov=apple_calendar_mcp   # 180 tests (CalDAV ones run against a local Radicale server)
+uv run pytest --cov=apple_calendar_mcp   # 190 tests (CalDAV ones run against a local Radicale server)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src                          # strict
 ```
