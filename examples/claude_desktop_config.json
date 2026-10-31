@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "apple-calendar": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/YOU/Projects/apple-calendar-mcp",
+        "run",
+        "apple-calendar-mcp"
+      ]
+    }
+  }
+}
