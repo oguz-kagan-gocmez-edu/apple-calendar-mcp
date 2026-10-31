@@ -1,12 +1,30 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
+dist/
+build/
+
+# Tool caches and reports
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
-dist/
-build/
-*.egg-info/
+
+# Local secrets and personal settings (never commit)
+.env
+.env.*
+.claude/settings.local.json
+
+# Helper app if built inside the repo (install-app --dest ...)
+*.app/
+
+# Editors and macOS
+.idea/
+.vscode/
 .DS_Store
+
+# uv.lock is committed on purpose: CI runs `uv sync --locked` for reproducible installs.
