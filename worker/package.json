@@ -1,0 +1,41 @@
+{
+  "name": "apple-calendar-mcp-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Apple Calendar (iCloud) MCP connector for claude.ai, on Cloudflare Workers' free plan.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/node",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/server": "2.4.0",
+    "agents": "0.32.0",
+    "fast-xml-parser": "5.11.2",
+    "ical.js": "2.2.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@cloudflare/workers-types": "5.20261031.1",
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "4.1.12",
+    "wrangler": "4.156.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20260815.1": true,
+    "workerd@1.20261023.1": true,
+    "core-js-pure": false
+  }
+}
