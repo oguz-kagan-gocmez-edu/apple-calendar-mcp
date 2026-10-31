@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# CI only reads the repo; keep the workflow token read-only.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint + test (Python ${{ matrix.python }}, ${{ matrix.os }})

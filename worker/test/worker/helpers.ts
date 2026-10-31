@@ -7,10 +7,13 @@ export const PASSWORD = "correct horse battery";
 
 let ipCounter = 0;
 /** A fresh client IP per call, so lockout counters don't leak between tests. */
-export const freshIp = (): string => `198.51.100.${++ipCounter}`;
+export const freshIp = (): string => `198.51.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`;
 
+/** A request from a fresh client IP (unless the caller sets one), like distinct users at the edge. */
 export function req(path: string, init: RequestInit = {}): Promise<Response> {
-  return SELF.fetch(`${BASE}${path}`, { redirect: "manual", ...init });
+  const headers = new Headers(init.headers);
+  if (!headers.has("CF-Connecting-IP")) headers.set("CF-Connecting-IP", freshIp());
+  return SELF.fetch(`${BASE}${path}`, { redirect: "manual", ...init, headers });
 }
 
 function b64url(bytes: ArrayBuffer | Uint8Array): string {

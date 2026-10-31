@@ -3,6 +3,8 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 /** Bindings, vars (wrangler.jsonc) and secrets (wrangler secret put). */
 export interface Env {
   OAUTH_KV: KVNamespace;
+  /** Per-IP limit on the public endpoints that write to KV (/register, /authorize). */
+  AUTH_RATE_LIMIT?: RateLimit;
   /** Injected by the OAuth provider. */
   OAUTH_PROVIDER: OAuthHelpers;
 

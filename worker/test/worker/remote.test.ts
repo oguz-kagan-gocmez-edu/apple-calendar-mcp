@@ -72,6 +72,34 @@ describe("registration", () => {
   );
 });
 
+describe("rate limiting", () => {
+  it("caps /register per client IP", async () => {
+    const ip = freshIp();
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await req("/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+        body: JSON.stringify({ redirect_uris: [CLAUDE], token_endpoint_auth_method: "none" }),
+      });
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, 10).every((s) => s === 201)).toBe(true);
+    expect(statuses.slice(10)).toEqual([429, 429]);
+    // Other clients are unaffected.
+    expect((await register()).status).toBe(201);
+  });
+
+  it("caps /authorize per client IP", async () => {
+    const flow = await startFlow();
+    const ip = freshIp();
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i++) statuses.push((await req(flow.url, { headers: { "CF-Connecting-IP": ip } })).status);
+    expect(statuses.slice(0, 10).every((s) => s === 200)).toBe(true);
+    expect(statuses[10]).toBe(429);
+  });
+});
+
 // ------------------------------------------------------------------ login page
 describe("login page", () => {
   it("escapes the client name and shows where the code goes", async () => {
