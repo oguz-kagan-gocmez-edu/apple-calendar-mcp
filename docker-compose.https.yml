@@ -1,0 +1,22 @@
+# Adds Caddy for HTTPS on a server with a public IP (ports 80 and 443).
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d
+# Needs DOMAIN in .env, pointing at this server's IP.
+services:
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    depends_on: [calendar]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # certificates
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

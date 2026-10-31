@@ -173,6 +173,22 @@ cloudflared tunnel --url http://localhost:8000
 ```
 Put the `https://….trycloudflare.com` address it prints into `PUBLIC_URL` and restart the server. (Quick tunnels get a new address each time; use a named tunnel or a host for something permanent.)
 
+#### On a server with Caddy (free Google Cloud VM)
+`docker-compose.https.yml` adds [Caddy](https://caddyserver.com), which gets the HTTPS certificate by itself. Any small Linux server with a public IP works; Google Cloud's always-free `e2-micro` (us-west1, us-central1 or us-east1) is enough:
+```bash
+gcloud compute instances create calendar-mcp --zone=us-central1-a --machine-type=e2-micro \
+  --image-family=debian-12 --image-project=debian-cloud --boot-disk-size=30GB \
+  --boot-disk-type=pd-standard --tags=https-server
+gcloud compute firewall-rules create allow-web --allow=tcp:80,tcp:443,udp:443 --target-tags=https-server
+gcloud compute scp deploy/gcp/setup-vm.sh calendar-mcp:~ --zone=us-central1-a
+gcloud compute ssh calendar-mcp --zone=us-central1-a --command='bash setup-vm.sh'
+```
+The script installs Docker, clones the repo and tells you what to put in `.env`. No domain needed: `<ip-with-dashes>.sslip.io` points at your IP. Then, on the server:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+Set a billing budget alert: Google's free tier rules can change, and the public IP may be billed.
+
 ### 4. Add it to Claude
 In claude.ai: **Settings → Connectors → Add custom connector**. Enter `https://<your server>/mcp`, click **Connect**, and type your `CONNECTOR_PASSWORD` on the page that opens. The connector now appears in your connectors list on web, desktop and mobile.
 
