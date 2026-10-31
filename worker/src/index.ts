@@ -88,6 +88,27 @@ const pages: ExportedHandler<Env> = {
   },
 };
 
+/**
+ * /register and /authorize are public and each call writes to KV, which the
+ * free plan caps at 1,000 writes a day. Once that is used up, sign-ins and
+ * token refreshes fail until the next day, so cap them per client IP.
+ * (Cloudflare's rate limiter counts per location; it's a speed bump for
+ * scripted abuse, not an exact quota.)
+ */
+const RATE_LIMITED = new Set(["/register", "/authorize"]);
+
+async function rateLimited(request: Request, env: Env): Promise<Response | null> {
+  const { pathname } = new URL(request.url);
+  if (!env.AUTH_RATE_LIMIT || !RATE_LIMITED.has(pathname)) return null;
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const { success } = await env.AUTH_RATE_LIMIT.limit({ key: `${pathname}:${ip}` });
+  if (success) return null;
+  return new Response("Too many requests. Try again in a minute.", {
+    status: 429,
+    headers: { "Retry-After": "60", "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 // One provider per origin (workers.dev, a custom domain, localhost in dev).
 const providers = new Map<string, OAuthProvider<Env>>();
 
@@ -131,6 +152,8 @@ export default {
       console.error(problem);
       return message("This connector isn't set up yet. See the server logs.", 503);
     }
+    const limited = await rateLimited(request, env);
+    if (limited) return limited;
     try {
       zoneOf(env);
       return await providerFor(new URL(request.url).origin, env).fetch(request, env, ctx);

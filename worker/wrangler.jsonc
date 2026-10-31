@@ -6,8 +6,14 @@
   "workers_dev": true,
   "observability": { "enabled": true },
   "kv_namespaces": [
-    // npx wrangler kv namespace create OAUTH_KV, then paste the id here
-    { "binding": "OAUTH_KV", "id": "9f5f5af5e8ce4924bad463f9760d45c5" }
+    // No id needed: on the first deploy Wrangler creates the namespace in your
+    // account and binds it; later deploys keep using the same one.
+    { "binding": "OAUTH_KV" }
+  ],
+  "ratelimits": [
+    // Per-IP cap on /register and /authorize (see src/index.ts). namespace_id is
+    // any number unique within your account; it is not a secret.
+    { "name": "AUTH_RATE_LIMIT", "namespace_id": "4711", "simple": { "limit": 10, "period": 60 } }
   ],
   "vars": {
     // Your time zone (IANA name). Times without an offset are read in this zone.
