@@ -178,6 +178,14 @@ class EventKitStore:
         if not result.get("granted"):
             err = result.get("error")
             detail = f" ({err.localizedDescription()})" if err is not None else ""
+            if self.authorization_status() == "not_determined":
+                # Refused without ever asking: the app that started us can't
+                # show the calendar prompt (it lacks the usage description).
+                raise PermissionDeniedError(
+                    f"macOS refused calendar access without showing a prompt{detail}. The app that "
+                    "started this server cannot ask for calendar access. Run "
+                    "`apple-calendar-mcp install-app`, then `apple-calendar-mcp doctor`."
+                )
             raise PermissionDeniedError(f"Calendar access was not granted{detail}.")
         # A store created before the grant may hold an empty snapshot.
         self._store.reset()

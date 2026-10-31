@@ -32,3 +32,9 @@ jobs:
       # to show the permission prompt.
       - if: runner.os == 'macOS'
         run: uv run python -c "import apple_calendar_mcp.eventkit_store as m; print(m.EventKitStore.authorization_status())"
+      # Build the helper app bundle for real and check its signature and launcher.
+      - if: runner.os == 'macOS'
+        run: |
+          uv run apple-calendar-mcp install-app --dest "$RUNNER_TEMP/Apple Calendar MCP.app"
+          codesign --verify --verbose "$RUNNER_TEMP/Apple Calendar MCP.app"
+          "$RUNNER_TEMP/Apple Calendar MCP.app/Contents/MacOS/apple-calendar-mcp-launcher" /bin/echo launcher-ok

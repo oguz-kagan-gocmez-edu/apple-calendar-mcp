@@ -75,8 +75,11 @@ flowchart LR
 git clone https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp.git
 cd apple-calendar-mcp
 uv sync
-uv run apple-calendar-mcp doctor    # checks permission, lists your calendars
+uv run apple-calendar-mcp install-app   # builds the helper app that holds calendar permission
+uv run apple-calendar-mcp doctor        # asks for permission, lists your calendars
 ```
+
+`doctor` triggers a macOS prompt for **"Apple Calendar MCP"**. Choose **Allow Full Access**. You only do this once: Claude Desktop, Claude Code and Terminal all reuse that permission. `install-app` needs the Xcode Command Line Tools (`xcode-select --install`).
 
 ### Claude Desktop
 
@@ -107,16 +110,19 @@ claude mcp add apple-calendar -s user -- uv --directory /Users/YOU/Projects/appl
 apple-calendar-mcp [--read-only] [--timezone Europe/Istanbul] [--log-level INFO]
 apple-calendar-mcp --backend memory --demo     # fake data, no Mac needed
 apple-calendar-mcp doctor
+apple-calendar-mcp install-app [--dest PATH]
 ```
 
 ## macOS permissions (read this if nothing works)
 
-macOS protects calendars with TCC (Transparency, Consent and Control). Access is granted **per host app**: the app that launched the server (Claude Desktop, Terminal, iTerm…) is the one that gets asked.
+macOS protects calendars with TCC (Transparency, Consent and Control). It asks on behalf of the **responsible app**: normally the GUI app that started the process. Since macOS 14 that app must declare `NSCalendarsFullAccessUsageDescription` in its Info.plist, or the request is **refused without any prompt**. Terminal and Claude don't declare it, so running the server directly fails with *"macOS refused calendar access without showing a prompt"*.
 
-- On first use you should see a "*… would like full access to your calendar*" prompt. Choose **Allow Full Access**. "Add Events Only" is not enough to read your events.
-- Granting Terminal access via `doctor` does **not** grant Claude Desktop access. Each host is approved separately.
-- If you never see a prompt, or you get "access was denied", open **System Settings → Privacy & Security → Calendars**, enable the host app, and restart it.
-- Some Claude Desktop versions have had trouble showing this prompt for MCP child processes. If the problem persists, use the server from **Claude Code in Terminal**, which uses Terminal's grant.
+`install-app` fixes this. It builds `~/Applications/Apple Calendar MCP.app`, a tiny ad-hoc-signed bundle with no Dock icon. The bundle declares calendar access and contains a ~70-line C launcher ([`launcher.c`](src/apple_calendar_mcp/macos_helper/launcher.c)). When the bundle is installed, `apple-calendar-mcp` re-runs itself through the launcher. The launcher makes the bundle responsible for its own permissions, so macOS asks for "Apple Calendar MCP" whichever app started the server. Your Claude config doesn't change.
+
+- Choose **Allow Full Access**. "Add Events Only" is not enough to read your events.
+- To change your answer later: **System Settings → Privacy & Security → Calendars → Apple Calendar MCP**.
+- `doctor` shows whether the helper app is in use. Set `APPLE_CALENDAR_MCP_NO_APP=1` to bypass it.
+- Rebuilding the app (for example after an upgrade) may ask for permission once more.
 - Without a GUI session (SSH, launchd), the prompt can never appear. The server times out after 30 s with a clear error instead of hanging.
 
 ## Try it without a Mac
@@ -131,7 +137,7 @@ npx @modelcontextprotocol/inspector uv run apple-calendar-mcp --backend memory -
 
 ```bash
 uv sync --group dev
-uv run pytest --cov=apple_calendar_mcp   # 98 tests
+uv run pytest --cov=apple_calendar_mcp   # 116 tests
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src                          # strict
 ```
@@ -144,9 +150,9 @@ The test suite has five layers:
 | Service | `test_service.py` | Create, update and delete validation, plus `this` / `future` / `all` semantics on recurring series |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py` | The EventKit backend running on a fake PyObjC layer: permission flow, all-day conversion, recurrence-rule mapping |
-| CLI | `test_cli.py` | Backend selection, `--read-only` and `--demo`, and `doctor` output on success and on permission errors |
+| CLI | `test_cli.py`, `test_macos_app.py` | Backend selection, `--read-only` and `--demo`, `doctor` output, and building the helper app and relaunching through it |
 
-CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings.
+CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app.
 
 ### Manual check on a Mac
 
