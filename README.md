@@ -1,6 +1,6 @@
 # apple-calendar-mcp
 
-[![CI](https://github.com/YOUR_GITHUB_USER/apple-calendar-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/apple-calendar-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -72,7 +72,7 @@ flowchart LR
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/apple-calendar-mcp.git
+git clone https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp.git
 cd apple-calendar-mcp
 uv sync
 uv run apple-calendar-mcp doctor    # checks permission, lists your calendars
@@ -131,12 +131,12 @@ npx @modelcontextprotocol/inspector uv run apple-calendar-mcp --backend memory -
 
 ```bash
 uv sync --group dev
-uv run pytest --cov=apple_calendar_mcp   # 89 tests
+uv run pytest --cov=apple_calendar_mcp   # 98 tests
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src                          # strict
 ```
 
-The test suite has four layers:
+The test suite has five layers:
 
 | Layer | File | What it covers |
 |---|---|---|
@@ -144,6 +144,7 @@ The test suite has four layers:
 | Service | `test_service.py` | Create, update and delete validation, plus `this` / `future` / `all` semantics on recurring series |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py` | The EventKit backend running on a fake PyObjC layer: permission flow, all-day conversion, recurrence-rule mapping |
+| CLI | `test_cli.py` | Backend selection, `--read-only` and `--demo`, and `doctor` output on success and on permission errors |
 
 CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings.
 
