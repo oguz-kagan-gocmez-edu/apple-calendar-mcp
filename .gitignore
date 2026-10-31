@@ -36,3 +36,6 @@ worker/.wrangler/
 worker/dist/
 worker/.dev.vars
 worker/.dev.vars.*
+
+# Personal scripts (e.g. deploy/local/update-cloudflare.sh); not part of the project
+deploy/local/
