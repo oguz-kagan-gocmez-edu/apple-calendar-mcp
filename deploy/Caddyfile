@@ -1,0 +1,6 @@
+# HTTPS in front of the connector. Caddy gets and renews the certificate itself.
+# DOMAIN comes from .env, e.g. 34-56-78-90.sslip.io or yourname.duckdns.org
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy calendar:8000
+}

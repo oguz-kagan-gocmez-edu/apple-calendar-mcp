@@ -1,0 +1,10 @@
+{
+  // Node-side tests: the platform-neutral core only (src/index, auth and env
+  // are Worker-only and checked by the root tsconfig).
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["es2023", "dom"]
+  },
+  "include": ["./**/*.ts", "../../vitest.config.ts"]
+}

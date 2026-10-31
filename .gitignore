@@ -29,3 +29,10 @@ htmlcov/
 .DS_Store
 
 # uv.lock is committed on purpose: CI runs `uv sync --locked` for reproducible installs.
+
+# Cloudflare Worker
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+worker/.dev.vars
+worker/.dev.vars.*

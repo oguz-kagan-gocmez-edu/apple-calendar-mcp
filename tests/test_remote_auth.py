@@ -238,6 +238,8 @@ async def test_login_page_escapes_client_name(remote: RemoteServer) -> None:
     assert "&lt;script&gt;" in page.text
     assert page.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    # The form's redirect goes to Claude; Chrome blocks it unless form-action allows it.
+    assert "form-action 'self' https://claude.ai;" in page.headers["content-security-policy"]
     assert page.headers["x-content-type-options"] == "nosniff"
     assert "claude.ai" in page.text  # tells the owner where the code goes
 
