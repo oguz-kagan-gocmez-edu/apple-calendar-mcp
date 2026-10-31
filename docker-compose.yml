@@ -1,0 +1,14 @@
+# Self-hosted remote connector. Put a TLS reverse proxy (Caddy, a tunnel, or your
+# host's HTTPS) in front: claude.ai only connects to https:// URLs.
+services:
+  calendar:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"   # local only; expose through your HTTPS proxy/tunnel
+    volumes:
+      - calendar-data:/data      # OAuth clients and hashed tokens survive restarts
+    restart: unless-stopped
+
+volumes:
+  calendar-data:

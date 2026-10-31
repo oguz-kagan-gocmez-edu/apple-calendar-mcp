@@ -205,3 +205,55 @@ def test_real_invocation_relaunches_via_helper(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(Relaunched) as exc:
         cli.main()
     assert exc.value.args[0] == ["/helper", "doctor"]
+
+
+# ------------------------------------------------------------------ remote connector
+def test_caldav_backend_needs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALDAV_USERNAME", raising=False)
+    monkeypatch.delenv("CALDAV_PASSWORD", raising=False)
+    with pytest.raises(SystemExit, match="CALDAV_USERNAME"):
+        cli._make_store("caldav", "UTC", demo=False)
+
+
+def test_caldav_backend_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("caldav")
+    from apple_calendar_mcp.caldav_store import CaldavStore
+
+    monkeypatch.setenv("CALDAV_USERNAME", "me@icloud.com")
+    monkeypatch.setenv("CALDAV_PASSWORD", "abcd-efgh-ijkl-mnop")
+    monkeypatch.setenv("CALDAV_DEFAULT_CALENDAR", "home")
+    store, _ = cli._make_store("caldav", "UTC", demo=False)
+    assert isinstance(store, CaldavStore)
+    assert store.url == "https://caldav.icloud.com"
+    assert store.default_calendar == "home"
+
+
+def test_serve_http_refuses_eventkit() -> None:
+    with pytest.raises(SystemExit, match="caldav"):
+        cli.main(["--backend", "eventkit", "serve-http"])
+
+
+def test_serve_http_needs_public_url_and_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PUBLIC_URL", raising=False)
+    monkeypatch.delenv("CONNECTOR_PASSWORD", raising=False)
+    with pytest.raises(SystemExit, match="PUBLIC_URL"):
+        cli.main(["--backend", "memory", "serve-http"])
+
+
+def test_serve_http_starts_remote_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from apple_calendar_mcp import remote
+
+    monkeypatch.setenv("PUBLIC_URL", "https://cal.example.com")
+    monkeypatch.setenv("CONNECTOR_PASSWORD", "a-long-enough-password")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def fake_serve(service: Any, config: remote.RemoteConfig, *, read_only: bool = False) -> None:
+        seen.update(config=config, read_only=read_only, store=service.store)
+
+    monkeypatch.setattr(remote, "serve", fake_serve)
+    assert cli.main(["--backend", "memory", "--demo", "--read-only", "serve-http", "--port", "9123"]) == 0
+    assert seen["config"].public_url == "https://cal.example.com"
+    assert seen["config"].port == 9123
+    assert seen["read_only"] is True
+    assert isinstance(seen["store"], MemoryStore)
