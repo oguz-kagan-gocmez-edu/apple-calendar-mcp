@@ -3,11 +3,12 @@
 import sys
 import types
 from datetime import datetime, tzinfo
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from apple_calendar_mcp import __version__, cli
+from apple_calendar_mcp import __version__, cli, macos_app
 from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.models import Calendar
 from apple_calendar_mcp.store import CalendarError
@@ -41,6 +42,15 @@ class FakeEventKitStore:
 
     def list_events(self, start: datetime, end: datetime) -> list[Any]:
         return []
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the helper app at an empty temp dir, whatever is installed on this machine."""
+    app = tmp_path / "Helper.app"
+    monkeypatch.setattr(macos_app, "default_app_path", lambda: app)
+    monkeypatch.delenv(macos_app.VIA_APP_ENV, raising=False)
+    return app
 
 
 @pytest.fixture
@@ -126,3 +136,72 @@ def test_doctor_reports_permission_error(
     fake_eventkit.fail = True
     assert cli.main(["doctor", "--timezone", "UTC"]) == 1
     assert "ERROR: access was denied" in capsys.readouterr().out
+
+
+def test_doctor_suggests_installing_helper(
+    fake_eventkit: type[FakeEventKitStore], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["doctor", "--timezone", "UTC"]) == 0
+    out = capsys.readouterr().out
+    assert "helper app         : not installed" in out
+    assert "install-app" in out
+
+
+def test_doctor_running_via_helper(
+    fake_eventkit: type[FakeEventKitStore],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(macos_app.VIA_APP_ENV, "1")
+    assert cli.main(["doctor", "--timezone", "UTC"]) == 0
+    out = capsys.readouterr().out
+    assert "helper app         : running via" in out
+    assert "Note:" not in out
+
+
+def test_install_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    built: list[Path | None] = []
+
+    def fake_build(app: Path | None = None) -> Path:
+        built.append(app)
+        return app or tmp_path
+
+    monkeypatch.setattr(macos_app, "build_app", fake_build)
+    assert cli.main(["install-app", "--dest", str(tmp_path / "X.app")]) == 0
+    assert built == [tmp_path / "X.app"]
+    assert "Installed" in capsys.readouterr().out
+
+
+def test_install_app_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def broken_build(app: Path | None = None) -> Path:
+        raise macos_app.AppBuildError("clang not found")
+
+    monkeypatch.setattr(macos_app, "build_app", broken_build)
+    assert cli.main(["install-app"]) == 1
+    assert "clang not found" in capsys.readouterr().err
+
+
+def test_install_app_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert cli.main(["install-app"]) == 1
+
+
+def test_real_invocation_relaunches_via_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["apple-calendar-mcp", "doctor"])
+    monkeypatch.setattr(macos_app, "relaunch_command", lambda argv: ["/helper", *argv])
+
+    class Relaunched(Exception):
+        pass
+
+    def fake_relaunch(cmd: list[str]) -> None:
+        raise Relaunched(cmd)
+
+    monkeypatch.setattr(macos_app, "relaunch", fake_relaunch)
+    with pytest.raises(Relaunched) as exc:
+        cli.main()
+    assert exc.value.args[0] == ["/helper", "doctor"]

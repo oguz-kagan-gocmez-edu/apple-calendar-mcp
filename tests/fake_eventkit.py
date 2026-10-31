@@ -264,6 +264,7 @@ class EKEventStore:
     status = 0  # not determined
     grant_on_request: bool | None = True  # None = never answer (simulates no GUI)
     requests = 0
+    prompt_shown = True  # False = refused without a prompt (host app can't ask)
 
     def __init__(self) -> None:
         self.calendars = [EKCalendar("CAL-HOME", "Home"), EKCalendar("CAL-HOL", "Holidays", writable=False)]
@@ -286,7 +287,8 @@ class EKEventStore:
         type(self).requests += 1
         if self.grant_on_request is None:
             return
-        type(self).status = 3 if self.grant_on_request else 2
+        if self.prompt_shown:
+            type(self).status = 3 if self.grant_on_request else 2
         handler(self.grant_on_request, None if self.grant_on_request else NSError("User denied"))
 
     def reset(self) -> None:

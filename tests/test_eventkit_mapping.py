@@ -19,6 +19,7 @@ from .conftest import IST
 def ek_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
     fk.install(monkeypatch)
     fk.EKEventStore.status, fk.EKEventStore.grant_on_request, fk.EKEventStore.requests = 0, True, 0
+    fk.EKEventStore.prompt_shown = True
     monkeypatch.delitem(sys.modules, "apple_calendar_mcp.eventkit_store", raising=False)
     module = importlib.import_module("apple_calendar_mcp.eventkit_store")
     yield module
@@ -43,6 +44,11 @@ class TestPermission:
     def test_denied(self, store) -> None:  # type: ignore[no-untyped-def]
         fk.EKEventStore.grant_on_request = False
         with pytest.raises(PermissionDeniedError, match="User denied"):
+            store.list_calendars()
+
+    def test_refused_without_prompt_points_to_helper_app(self, store) -> None:  # type: ignore[no-untyped-def]
+        fk.EKEventStore.grant_on_request, fk.EKEventStore.prompt_shown = False, False
+        with pytest.raises(PermissionDeniedError, match=r"without showing a prompt.*install-app"):
             store.list_calendars()
 
     def test_no_answer_times_out(self, store) -> None:  # type: ignore[no-untyped-def]
