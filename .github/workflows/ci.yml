@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint + test (Python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src
+      - run: uv run pytest --cov=apple_calendar_mcp --cov-report=term-missing
+      # On macOS, import the real PyObjC bindings: catches renamed EventKit
+      # symbols. We never call EventKit here; CI runners have no GUI session
+      # to show the permission prompt.
+      - if: runner.os == 'macOS'
+        run: uv run python -c "import apple_calendar_mcp.eventkit_store as m; print(m.EventKitStore.authorization_status())"

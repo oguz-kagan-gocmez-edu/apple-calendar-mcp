@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "apple-calendar-mcp"
+version = "0.1.0"
+description = "MCP server that lets Claude read and manage Apple Calendar on macOS via EventKit"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Oğuz Kağan Göçmez" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "model-context-protocol", "claude", "apple-calendar", "eventkit", "macos"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Scheduling",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "pydantic>=2.7",
+    "pyobjc-framework-EventKit>=10.3; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+apple-calendar-mcp = "apple_calendar_mcp.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.6", "mypy>=1.11", "pytest-cov>=5"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/apple_calendar_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # allow non-ASCII (Turkish) text
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+exclude = ["src/apple_calendar_mcp/eventkit_store.py"]  # PyObjC has no type stubs
+plugins = ["pydantic.mypy"]
