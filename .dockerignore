@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.env
+.env.*
+!.env.example
+data
+dist
+build
+tests
+**/__pycache__
+*.app
+.DS_Store

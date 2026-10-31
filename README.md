@@ -9,6 +9,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that lets Cla
 
 It talks to macOS through Apple's **EventKit** framework. That is the same database Calendar.app uses, so every account synced on your Mac (iCloud, Google, Exchange, your university's Outlook) shows up through one interface. Nothing leaves your machine except what Claude reads in the conversation.
 
+It can also run as a **remote connector** for claude.ai on the web and on your phone: your own small server that talks to iCloud over CalDAV and signs Claude in with OAuth. See [Remote connector](#remote-connector-claudeai-web-and-mobile).
+
 ```text
 You:    Find me two free hours this week for the CS350 project, then block them.
 Claude: ▸ get_time_context  ▸ find_free_slots  ▸ create_event
@@ -46,14 +48,18 @@ flowchart LR
         T["server.py<br/>MCP tools + schemas"] --> V["service.py<br/>validation, defaults,<br/>search, free slots"]
         V --> P{{"CalendarStore<br/>(Protocol)"}}
         P --> EK["eventkit_store.py<br/>PyObjC → EventKit"]
+        P --> CD["caldav_store.py<br/>CalDAV → iCloud"]
         P --> M["memory_store.py<br/>in-memory (tests, demo)"]
     end
     EK --> DB[(macOS Calendar database<br/>iCloud · Google · Exchange)]
+    W[claude.ai web / mobile] -- "HTTPS + OAuth<br/>remote.py" --> S
+    CD --> IC[(iCloud CalDAV)]
 ```
 
 - **`server.py`** declares the tools. The function signatures and pydantic `Field` descriptions become the JSON Schema Claude sees. The file contains no logic.
 - **`service.py`** turns loose model input into precise requests. It parses ISO 8601, fills defaults (a 1-hour duration, all-day ranges, search windows), keeps the duration when only the start time moves, and builds search and free-slot finding on top of plain CRUD.
-- **`CalendarStore`** is a six-method protocol. The EventKit backend is the real one. The in-memory backend reproduces EventKit's recurrence semantics, so the entire service and MCP layer is tested on Linux CI.
+- **`CalendarStore`** is a six-method protocol with three backends. EventKit is the local one. CalDAV powers the remote connector. The in-memory backend reproduces the recurrence semantics both of them follow, so the service and MCP layers are tested on Linux CI.
+- **`remote.py`** serves the same tools over streamable HTTP, behind a single-owner OAuth authorization server (dynamic client registration, PKCE, rotating refresh tokens, hashed storage).
 - **`scheduling.py`** finds free slots with interval arithmetic: sort, merge the busy intervals, then sweep each day with two pointers. That is O(n log n + d) for n events over d days.
 
 ### Design decisions worth knowing
@@ -111,6 +117,8 @@ apple-calendar-mcp [--read-only] [--timezone Europe/Istanbul] [--log-level INFO]
 apple-calendar-mcp --backend memory --demo     # fake data, no Mac needed
 apple-calendar-mcp doctor
 apple-calendar-mcp install-app [--dest PATH]
+apple-calendar-mcp --backend caldav doctor     # iCloud over CalDAV (CALDAV_* env vars)
+apple-calendar-mcp serve-http [--host H] [--port P]   # remote connector, see below
 ```
 
 ## macOS permissions (read this if nothing works)
@@ -125,6 +133,61 @@ macOS protects calendars with TCC (Transparency, Consent and Control). It asks o
 - Rebuilding the app (for example after an upgrade) may ask for permission once more.
 - Without a GUI session (SSH, launchd), the prompt can never appear. The server times out after 30 s with a clear error instead of hanging.
 
+## Remote connector (claude.ai web and mobile)
+
+The local server only works where it runs: your Mac. To use your calendar from claude.ai in a browser or the Claude phone app, run your own copy of the **remote connector** on a small server. It talks to iCloud over CalDAV and is added to Claude as a custom connector.
+
+```mermaid
+flowchart LR
+    A[Claude on web / phone] -- "HTTPS + OAuth" --> B[your server<br/>apple-calendar-mcp serve-http]
+    B -- "CalDAV + app-specific password" --> C[(iCloud Calendar)]
+```
+
+Each person runs their own copy with their own credentials. Nobody else holds your Apple ID details.
+
+### 1. Create an app-specific password
+At [appleid.apple.com](https://appleid.apple.com) go to **Sign-In and Security → App-Specific Passwords** and create one called "Claude calendar". You can revoke it there at any time.
+
+### 2. Configure
+```bash
+cp .env.example .env
+```
+Fill in `CALDAV_USERNAME` (your Apple ID), `CALDAV_PASSWORD` (the app-specific password), `PUBLIC_URL` (the https address of your server), `CONNECTOR_PASSWORD` (a long random string you'll type once when connecting) and `TZ`.
+
+Check the iCloud side before deploying:
+```bash
+uv sync --extra remote
+uv run --env-file .env apple-calendar-mcp --backend caldav doctor
+```
+
+### 3. Run it
+With Docker, on any host:
+```bash
+docker compose up -d
+```
+Or without Docker: `uv run --env-file .env apple-calendar-mcp serve-http`.
+
+claude.ai only connects to **https** addresses. Use your host's HTTPS (Fly.io, Render, Railway and similar give you one), a reverse proxy like Caddy, or, to try it from your own computer, a tunnel:
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+Put the `https://….trycloudflare.com` address it prints into `PUBLIC_URL` and restart the server. (Quick tunnels get a new address each time; use a named tunnel or a host for something permanent.)
+
+### 4. Add it to Claude
+In claude.ai: **Settings → Connectors → Add custom connector**. Enter `https://<your server>/mcp`, click **Connect**, and type your `CONNECTOR_PASSWORD` on the page that opens. The connector now appears in your connectors list on web, desktop and mobile.
+
+### Security notes
+- Claude gets in only through OAuth. Registration accepts only Claude's own redirect URIs. `http://localhost` (for the MCP Inspector) is allowed only when `PUBLIC_URL` is itself localhost, or with `OAUTH_ALLOW_LOCALHOST=1`.
+- The login page names the site the sign-in will return to, compares the password in constant time, and locks out after repeated failures (5 per IP, 20 overall, per 15 minutes). The server refuses to start with the example password from `.env.example`.
+- Access tokens last 1 hour, refresh tokens 30 days and rotate on every use. If an old refresh token is ever replayed, the whole grant is revoked and you sign in again. Codes and tokens are stored only as SHA-256 hashes in `DATA_DIR/auth.db` (owner-only permissions).
+- Public endpoints are bounded: a flood of client registrations can't push out a signed-in Claude, and unfinished sign-ins are capped.
+- Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
+- The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
+- `--read-only` works here too, if you want Claude on the web to only read your calendar.
+
+### What the remote connector can't see
+It reads **iCloud** calendars only. Google, Exchange or university calendars that your Mac syncs through Calendar.app are not on iCloud, so only the local (EventKit) server sees them. Subscribed calendars and Birthdays are not available over CalDAV either.
+
 ## Try it without a Mac
 
 The in-memory backend serves a realistic fake week, which is handy with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
@@ -136,23 +199,24 @@ npx @modelcontextprotocol/inspector uv run apple-calendar-mcp --backend memory -
 ## Development
 
 ```bash
-uv sync --group dev
-uv run pytest --cov=apple_calendar_mcp   # 116 tests
+uv sync --group dev --extra remote
+uv run pytest --cov=apple_calendar_mcp   # 190 tests (CalDAV ones run against a local Radicale server)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src                          # strict
 ```
 
-The test suite has five layers:
+The test suite has six layers:
 
 | Layer | File | What it covers |
 |---|---|---|
 | Unit | `test_timeutil_recurrence.py`, `test_scheduling.py` | ISO parsing, DST-safe recurrence expansion, interval merging and free slots |
 | Service | `test_service.py` | Create, update and delete validation, plus `this` / `future` / `all` semantics on recurring series |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
-| Backend | `test_eventkit_mapping.py` | The EventKit backend running on a fake PyObjC layer: permission flow, all-day conversion, recurrence-rule mapping |
+| Backend | `test_eventkit_mapping.py`, `test_caldav_store.py` | EventKit on a fake PyObjC layer. CalDAV against a real Radicale server, re-running every service scenario plus iCalendar mapping (overrides, EXDATE, all-day, alarms, RRULE) |
+| Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |
 | CLI | `test_cli.py`, `test_macos_app.py` | Backend selection, `--read-only` and `--demo`, `doctor` output, and building the helper app and relaunching through it |
 
-CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app.
+CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app. A Docker job builds the remote-connector image and checks it starts and requires a token.
 
 ### Manual check on a Mac
 
@@ -169,7 +233,7 @@ CI cannot click "Allow" in a permission dialog. Before a release, run through th
 - **No invitations.** EventKit cannot add attendees. Attendees are read-only.
 - **Recurrence subset.** Repeat rules support daily, weekly (with weekdays), monthly and yearly frequency, with an interval and a count or until date. More complex rules created in Calendar.app (for example "last Friday of the month") are reported in simplified form.
 - **Reminders** are not supported yet. EventKit exposes them through the same store, so this would be a natural next step.
-- **Remote connector.** A CalDAV backend for iCloud would implement the same `CalendarStore` protocol and could be served over streamable HTTP. That would let it work as a claude.ai custom connector on web and mobile.
+- **Remote connector is self-hosted.** Each person runs their own server. A shared, multi-user service listed in Claude's connector directory would need encrypted per-user credential storage and Anthropic's review.
 
 ## License
 
