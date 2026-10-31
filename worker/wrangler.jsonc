@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "apple-calendar-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    // npx wrangler kv namespace create OAUTH_KV, then paste the id here
+    { "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }
+  ],
+  "vars": {
+    // Your time zone (IANA name). Times without an offset are read in this zone.
+    "TZ": "Europe/Istanbul",
+    // iCloud by default; any CalDAV server works.
+    "CALDAV_URL": "https://caldav.icloud.com",
+    // Calendar id or title for new events; empty means the first writable one.
+    "CALDAV_DEFAULT_CALENDAR": "",
+    // "1" hides create/update/delete.
+    "READ_ONLY": "0"
+  }
+  // Secrets (never in this file): npx wrangler secret put CALDAV_USERNAME / CALDAV_PASSWORD / CONNECTOR_PASSWORD
+}

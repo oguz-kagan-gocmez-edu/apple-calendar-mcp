@@ -443,8 +443,9 @@ class LoginLimiter:
             self._fails.append((now, ip))
 
 
+_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action {}; frame-ancestors 'none'"
 _SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": _CSP.format("'self'"),
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
@@ -460,11 +461,13 @@ class _Consent:
     request_id: str
     client_name: str
     destination: str  # host the sign-in code is sent to
+    origin: str  # its origin: the form's redirect goes there, so the CSP must allow it
 
     @classmethod
     def of(cls, request_id: str, client: OAuthClientInformationFull, params: AuthorizationParams) -> _Consent:
         name = " ".join((client.client_name or "Claude").split())[:MAX_CLIENT_NAME] or "Claude"
-        return cls(request_id, name, urlparse(str(params.redirect_uri)).netloc)
+        target = urlparse(str(params.redirect_uri))
+        return cls(request_id, name, target.netloc, f"{target.scheme}://{target.netloc}")
 
 
 def _login_page(consent: _Consent, error: str | None = None, status: int = 200) -> HTMLResponse:
@@ -497,7 +500,9 @@ Only continue if you started connecting there.</p>{err}
  <div class="row"><button class="no" name="action" value="deny">Deny</button>
  <button class="ok" name="action" value="allow">Allow</button></div>
 </form></main></body></html>"""
-    return HTMLResponse(body, status_code=status, headers=_SECURITY_HEADERS)
+    # Chrome applies form-action to the redirect after the POST too.
+    headers = {**_SECURITY_HEADERS, "Content-Security-Policy": _CSP.format(f"'self' {consent.origin}")}
+    return HTMLResponse(body, status_code=status, headers=headers)
 
 
 def _message(text: str, status: int) -> HTMLResponse:

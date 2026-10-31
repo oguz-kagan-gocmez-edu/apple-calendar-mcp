@@ -135,11 +135,11 @@ macOS protects calendars with TCC (Transparency, Consent and Control). It asks o
 
 ## Remote connector (claude.ai web and mobile)
 
-The local server only works where it runs: your Mac. To use your calendar from claude.ai in a browser or the Claude phone app, run your own copy of the **remote connector** on a small server. It talks to iCloud over CalDAV and is added to Claude as a custom connector.
+The local server only works where it runs: your Mac. To use your calendar from claude.ai in a browser or the Claude phone app, run your own copy of the **remote connector**. It talks to iCloud over CalDAV and is added to Claude as a custom connector. The easiest home for it is Cloudflare's free Workers plan: no server, no card, always on.
 
 ```mermaid
 flowchart LR
-    A[Claude on web / phone] -- "HTTPS + OAuth" --> B[your server<br/>apple-calendar-mcp serve-http]
+    A[Claude on web / phone] -- "HTTPS + OAuth" --> B[your connector<br/>Cloudflare Worker or your own server]
     B -- "CalDAV + app-specific password" --> C[(iCloud Calendar)]
 ```
 
@@ -148,7 +148,36 @@ Each person runs their own copy with their own credentials. Nobody else holds yo
 ### 1. Create an app-specific password
 At [appleid.apple.com](https://appleid.apple.com) go to **Sign-In and Security → App-Specific Passwords** and create one called "Claude calendar". You can revoke it there at any time.
 
-### 2. Configure
+### 2. Deploy it
+
+#### Free, on Cloudflare Workers (recommended)
+The `worker/` folder is the same connector written for [Cloudflare Workers](https://developers.cloudflare.com/workers/): same tools, same sign-in page. The free plan is plenty for one person (100,000 requests a day) and needs no card. You need Node.js 22 or newer.
+
+1. Create a free account at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up), then sign in from the terminal:
+   ```bash
+   cd worker && npm ci && npx wrangler login
+   ```
+2. Create the storage for sign-ins and paste the `id` it prints into `worker/wrangler.jsonc` (`kv_namespaces`):
+   ```bash
+   npx wrangler kv namespace create OAUTH_KV
+   ```
+   Set your time zone (`TZ`) in the same file.
+3. Add the secrets. Each command asks for the value; it is stored encrypted at Cloudflare and never in a file:
+   ```bash
+   npx wrangler secret put CALDAV_USERNAME     # your Apple ID email
+   npx wrangler secret put CALDAV_PASSWORD     # the app-specific password
+   npx wrangler secret put CONNECTOR_PASSWORD  # a long random string you'll type once when connecting
+   ```
+4. Deploy:
+   ```bash
+   npx wrangler deploy
+   ```
+   It prints your address, `https://apple-calendar-mcp.<your-account>.workers.dev`. Your connector URL is that address plus `/mcp`.
+
+To update later, `git pull` and run `npx wrangler deploy` again. `npx wrangler tail` shows live logs.
+
+#### Or run the Python server yourself
+Configure it:
 ```bash
 cp .env.example .env
 ```
@@ -160,8 +189,7 @@ uv sync --extra remote
 uv run --env-file .env apple-calendar-mcp --backend caldav doctor
 ```
 
-### 3. Run it
-With Docker, on any host:
+Then run it with Docker, on any host:
 ```bash
 docker compose up -d
 ```
@@ -173,7 +201,7 @@ cloudflared tunnel --url http://localhost:8000
 ```
 Put the `https://….trycloudflare.com` address it prints into `PUBLIC_URL` and restart the server. (Quick tunnels get a new address each time; use a named tunnel or a host for something permanent.)
 
-#### On a server with Caddy (free Google Cloud VM)
+**On a server with Caddy (Google Cloud VM).**
 `docker-compose.https.yml` adds [Caddy](https://caddyserver.com), which gets the HTTPS certificate by itself. Any small Linux server with a public IP works; Google Cloud's always-free `e2-micro` (us-west1, us-central1 or us-east1) is enough:
 ```bash
 gcloud compute instances create calendar-mcp --zone=us-central1-a --machine-type=e2-micro \
@@ -189,8 +217,8 @@ docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
 ```
 Set a billing budget alert: Google's free tier rules can change, and the public IP may be billed.
 
-### 4. Add it to Claude
-In claude.ai: **Settings → Connectors → Add custom connector**. Enter `https://<your server>/mcp`, click **Connect**, and type your `CONNECTOR_PASSWORD` on the page that opens. The connector now appears in your connectors list on web, desktop and mobile.
+### 3. Add it to Claude
+In claude.ai: **Settings → Connectors → Add custom connector**. Enter your connector URL (`https://…workers.dev/mcp`, or `https://<your server>/mcp`), click **Connect**, and type your `CONNECTOR_PASSWORD` on the page that opens. The connector now appears in your connectors list on web, desktop and mobile.
 
 ### Security notes
 - Claude gets in only through OAuth. Registration accepts only Claude's own redirect URIs. `http://localhost` (for the MCP Inspector) is allowed only when `PUBLIC_URL` is itself localhost, or with `OAUTH_ALLOW_LOCALHOST=1`.
@@ -199,7 +227,8 @@ In claude.ai: **Settings → Connectors → Add custom connector**. Enter `https
 - Public endpoints are bounded: a flood of client registrations can't push out a signed-in Claude, and unfinished sign-ins are capped.
 - Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
 - The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
-- `--read-only` works here too, if you want Claude on the web to only read your calendar.
+- `--read-only` works here too, if you want Claude on the web to only read your calendar (on Workers: `"READ_ONLY": "1"` in `wrangler.jsonc`).
+- On Cloudflare Workers, OAuth is handled by Cloudflare's [`workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): tokens are stored hashed in Workers KV and props are encrypted with the token. The same rules apply (Claude-only redirect URIs, 1 hour access tokens, 30 day rotating refresh tokens, lockout), with two differences: an old refresh token keeps working until its replacement is first used, and the lockout counter lives in KV, which is eventually consistent, so the limit is approximate.
 
 ### What the remote connector can't see
 It reads **iCloud** calendars only. Google, Exchange or university calendars that your Mac syncs through Calendar.app are not on iCloud, so only the local (EventKit) server sees them. Subscribed calendars and Birthdays are not available over CalDAV either.
@@ -232,7 +261,9 @@ The test suite has six layers:
 | Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |
 | CLI | `test_cli.py`, `test_macos_app.py` | Backend selection, `--read-only` and `--demo`, `doctor` output, and building the helper app and relaunching through it |
 
-CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app. A Docker job builds the remote-connector image and checks it starts and requires a token.
+The Cloudflare Worker has its own TypeScript suite (`cd worker && npm test`): the same service scenarios against Radicale, recurrence and DST checks, a CPU budget check (the free plan allows 10 ms of CPU per request), and the OAuth flow and MCP tools inside `workerd`, the real Workers runtime.
+
+CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app. A Docker job builds the remote-connector image and checks it starts and requires a token. A Worker job type-checks, lints, tests and builds the Cloudflare Worker.
 
 ### Manual check on a Mac
 
@@ -249,7 +280,7 @@ CI cannot click "Allow" in a permission dialog. Before a release, run through th
 - **No invitations.** EventKit cannot add attendees. Attendees are read-only.
 - **Recurrence subset.** Repeat rules support daily, weekly (with weekdays), monthly and yearly frequency, with an interval and a count or until date. More complex rules created in Calendar.app (for example "last Friday of the month") are reported in simplified form.
 - **Reminders** are not supported yet. EventKit exposes them through the same store, so this would be a natural next step.
-- **Remote connector is self-hosted.** Each person runs their own server. A shared, multi-user service listed in Claude's connector directory would need encrypted per-user credential storage and Anthropic's review.
+- **Remote connector is self-hosted.** Each person runs their own copy (a free Cloudflare Worker or a server). A shared, multi-user service listed in Claude's connector directory would need encrypted per-user credential storage and Anthropic's review.
 
 ## License
 
