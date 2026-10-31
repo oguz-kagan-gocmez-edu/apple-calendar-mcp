@@ -22,7 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked --group dev
+      - run: uv sync --locked --group dev --extra remote
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src
@@ -38,3 +38,19 @@ jobs:
           uv run apple-calendar-mcp install-app --dest "$RUNNER_TEMP/Apple Calendar MCP.app"
           codesign --verify --verbose "$RUNNER_TEMP/Apple Calendar MCP.app"
           "$RUNNER_TEMP/Apple Calendar MCP.app/Contents/MacOS/apple-calendar-mcp-launcher" /bin/echo launcher-ok
+
+  docker:
+    name: Docker image (remote connector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t apple-calendar-mcp .
+      # Start with demo data (no iCloud account in CI) and check it serves and requires a token.
+      - run: |
+          docker run -d --name cal -p 8000:8000 \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            -e PUBLIC_URL=http://localhost:8000 -e CONNECTOR_PASSWORD=ci-only-password-123 \
+            apple-calendar-mcp apple-calendar-mcp --backend memory --demo serve-http
+          for i in $(seq 1 30); do curl -fs http://localhost:8000/healthz && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/mcp)" = "401"
+          docker logs cal

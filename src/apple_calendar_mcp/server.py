@@ -9,8 +9,9 @@ are read-only and which are destructive, so it can ask the user first.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Annotated, TypeVar
+from typing import Annotated, Any, TypeVar
 
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -79,12 +80,21 @@ def _guard(fn: Callable[[], T]) -> T:
         raise ToolError(str(exc)) from exc
 
 
-def build_server(service: CalendarService, *, read_only: bool = False) -> MCPServer:
+def build_server(
+    service: CalendarService,
+    *,
+    read_only: bool = False,
+    auth_server_provider: Any = None,
+    auth: AuthSettings | None = None,
+) -> MCPServer:
+    """The MCP server with all tools. ``auth_*`` are only set for the remote (HTTP) connector."""
     mcp = MCPServer(
         name="apple-calendar",
         title="Apple Calendar",
         version=__version__,
         instructions=INSTRUCTIONS,
+        auth_server_provider=auth_server_provider,
+        auth=auth,
     )
 
     # ---------------------------------------------------------------- reads
