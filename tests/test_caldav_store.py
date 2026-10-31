@@ -24,7 +24,7 @@ pytest.importorskip("radicale")
 import caldav
 from caldav.lib import error as dav_error
 
-from apple_calendar_mcp.caldav_store import CaldavStore
+from apple_calendar_mcp.caldav_store import CaldavStore, _object_href
 from apple_calendar_mcp.models import EventDraft, EventPatch, Recurrence, Span
 from apple_calendar_mcp.service import CalendarService
 from apple_calendar_mcp.store import BackendError, NotFoundError, PermissionDeniedError
@@ -218,3 +218,11 @@ def test_caldav_library_cannot_log_event_contents() -> None:
     import logging
 
     assert logging.getLogger("caldav").getEffectiveLevel() >= logging.ERROR
+
+
+def test_foreign_uids_cannot_escape_the_calendar() -> None:
+    class Cal:
+        url = "https://dav.example/123/calendars/work/"
+
+    href = _object_href(Cal(), "../../other/evil")
+    assert href == "https://dav.example/123/calendars/work/..%2F..%2Fother%2Fevil.ics"

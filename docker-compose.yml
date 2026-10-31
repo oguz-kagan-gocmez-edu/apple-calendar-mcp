@@ -9,6 +9,13 @@ services:
     volumes:
       - calendar-data:/data      # OAuth clients and hashed tokens survive restarts
     restart: unless-stopped
+    # Least privilege: nothing but /data (and a small /tmp) is writable.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   calendar-data:

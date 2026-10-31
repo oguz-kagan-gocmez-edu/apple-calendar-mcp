@@ -62,6 +62,11 @@ REFRESH_TTL = 30 * 24 * 60 * 60
 CODE_TTL = 5 * 60
 LOGIN_TTL = 10 * 60
 MAX_CLIENTS = 100
+MAX_PENDING = 50  # unfinished sign-ins; /authorize is public, so cap what it can store
+MAX_FORM_BYTES = 8 * 1024
+MAX_CLIENT_NAME = 80
+# Values shipped in .env.example / docs: a server must never start with one of these.
+_PLACEHOLDER_PASSWORDS = {"change-me-to-a-long-random-string", "ci-only-password-123"}
 DEFAULT_REDIRECTS = (
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
@@ -79,7 +84,7 @@ class RemoteConfig:
     password: str
     data_dir: Path
     allowed_redirects: tuple[str, ...] = DEFAULT_REDIRECTS
-    allow_localhost_redirects: bool = True
+    allow_localhost_redirects: bool = False
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -88,8 +93,12 @@ class RemoteConfig:
         parsed = urlparse(self.public_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError("PUBLIC_URL must be a full URL, e.g. https://calendar.example.com")
+        if parsed.path or parsed.query or parsed.fragment:
+            raise ValueError("PUBLIC_URL must be just the address, without a path (no /mcp).")
         if len(self.password) < 12:
             raise ValueError("CONNECTOR_PASSWORD must be at least 12 characters.")
+        if self.password in _PLACEHOLDER_PASSWORDS and not self.is_local:
+            raise ValueError("CONNECTOR_PASSWORD is still the example value. Generate a new one.")
 
     @property
     def is_local(self) -> bool:
@@ -107,13 +116,17 @@ class RemoteConfig:
         extra = tuple(
             u.strip() for u in os.environ.get("OAUTH_ALLOWED_REDIRECTS", "").split(",") if u.strip()
         )
+        local = (urlparse(public_url).hostname or "") in _LOCAL_HOSTS
+        # http://localhost redirects are for the MCP Inspector during local testing.
+        # On a public server they're off unless asked for.
+        allow_local = os.environ.get("OAUTH_ALLOW_LOCALHOST", "1" if local else "0") == "1"
         try:
             return cls(
                 public_url=public_url,
                 password=password,
                 data_dir=Path(os.environ.get("DATA_DIR", "./data")),
                 allowed_redirects=DEFAULT_REDIRECTS + extra,
-                allow_localhost_redirects=os.environ.get("OAUTH_ALLOW_LOCALHOST", "1") != "0",
+                allow_localhost_redirects=allow_local,
                 host=host or os.environ.get("HOST", "127.0.0.1"),
                 port=port or int(os.environ.get("PORT", "8000")),
             )
@@ -195,11 +208,17 @@ class OwnerAuthProvider:
             )
         with self.db.tx() as db:
             (count,) = db.execute("SELECT COUNT(*) FROM clients").fetchone()
-            if count >= MAX_CLIENTS:  # drop the oldest registrations rather than grow forever
+            if count >= MAX_CLIENTS:
+                # Registration is public. Make room by dropping the oldest clients that
+                # were never signed in, so a flood can't push out Claude's real client.
                 db.execute(
-                    "DELETE FROM clients WHERE id IN (SELECT id FROM clients ORDER BY created LIMIT ?)",
-                    (count - MAX_CLIENTS + 1,),
+                    "DELETE FROM clients WHERE id IN (SELECT id FROM clients WHERE id NOT IN "
+                    "(SELECT client_id FROM tokens WHERE expires >= ?) ORDER BY created LIMIT ?)",
+                    (self.clock(), count - MAX_CLIENTS + 1),
                 )
+                (count,) = db.execute("SELECT COUNT(*) FROM clients").fetchone()
+                if count >= MAX_CLIENTS:
+                    raise RegistrationError("invalid_client_metadata", "Too many registered clients.")
             db.execute(
                 "INSERT OR REPLACE INTO clients (id, info, created) VALUES (?, ?, ?)",
                 (client_info.client_id, client_info.model_dump_json(), self.clock()),
@@ -208,10 +227,19 @@ class OwnerAuthProvider:
     # -- authorization (owner login)
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         request_id = secrets.token_urlsafe(24)
+        now = self.clock()
         with self.db.tx() as db:
+            db.execute("DELETE FROM pending WHERE expires < ?", (now,))
+            db.execute("DELETE FROM codes WHERE expires < ?", (now,))
+            (count,) = db.execute("SELECT COUNT(*) FROM pending").fetchone()
+            if count >= MAX_PENDING:  # drop the oldest unfinished sign-ins
+                db.execute(
+                    "DELETE FROM pending WHERE id IN (SELECT id FROM pending ORDER BY expires LIMIT ?)",
+                    (count - MAX_PENDING + 1,),
+                )
             db.execute(
                 "INSERT INTO pending (id, client_id, params, expires) VALUES (?, ?, ?, ?)",
-                (request_id, client.client_id, params.model_dump_json(), self.clock() + LOGIN_TTL),
+                (request_id, client.client_id, params.model_dump_json(), now + LOGIN_TTL),
             )
         return f"{self.config.public_url}/login?request={request_id}"
 
@@ -321,11 +349,23 @@ class OwnerAuthProvider:
             return None
         return row[0], json.loads(row[1]), row[2], row[3], row[4]
 
+    def _revoke_family(self, family: str) -> None:
+        with self.db.tx() as db:
+            db.execute("DELETE FROM tokens WHERE family = ?", (family,))
+
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
         row = self._load(refresh_token, "refresh")
-        if row is None or row[0] != client.client_id:
+        if row is None:
+            replayed = self._load(refresh_token, "refresh_used")
+            if replayed is not None:
+                # A rotated-out refresh token came back: someone holds a copy.
+                # End the whole grant so the stolen copy and its successors stop working.
+                log.warning("refresh token reuse detected; grant revoked")
+                self._revoke_family(replayed[3])
+            return None
+        if row[0] != client.client_id:
             return None
         return RefreshToken(
             token=refresh_token,
@@ -345,8 +385,13 @@ class OwnerAuthProvider:
         granted = row[1]
         if scopes and not set(scopes) <= set(granted):
             raise TokenError("invalid_scope", "Requested scopes exceed the original grant.")
-        with self.db.tx() as db:  # rotate: the old refresh token stops working
-            db.execute("DELETE FROM tokens WHERE hash = ?", (_hash(refresh_token.token),))
+        with self.db.tx() as db:  # rotate: the old refresh token stops working (kept to spot replays)
+            rotated = db.execute(
+                "UPDATE tokens SET kind = 'refresh_used' WHERE hash = ? AND kind = 'refresh'",
+                (_hash(refresh_token.token),),
+            ).rowcount
+        if not rotated:  # a concurrent request already used it
+            raise TokenError("invalid_grant", "Refresh token is invalid or expired.")
         return self._issue(client.client_id, scopes or granted, row[2], row[3])
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -365,8 +410,8 @@ class OwnerAuthProvider:
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         with self.db.tx() as db:
             row = db.execute("SELECT family FROM tokens WHERE hash = ?", (_hash(token.token),)).fetchone()
-            if row:  # revoke the whole grant (access + refresh)
-                db.execute("DELETE FROM tokens WHERE family = ?", (row[0],))
+        if row:  # revoke the whole grant (access + refresh)
+            self._revoke_family(row[0])
 
     async def exchange_identity_assertion(
         self, client: OAuthClientInformationFull, params: Any
@@ -403,12 +448,26 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Strict-Transport-Security": "max-age=31536000",  # ignored by browsers over plain http
 }
 
 
-def _login_page(
-    request_id: str, client_name: str, error: str | None = None, status: int = 200
-) -> HTMLResponse:
+@dataclass(frozen=True)
+class _Consent:
+    """What the owner is asked to approve on the login page."""
+
+    request_id: str
+    client_name: str
+    destination: str  # host the sign-in code is sent to
+
+    @classmethod
+    def of(cls, request_id: str, client: OAuthClientInformationFull, params: AuthorizationParams) -> _Consent:
+        name = " ".join((client.client_name or "Claude").split())[:MAX_CLIENT_NAME] or "Claude"
+        return cls(request_id, name, urlparse(str(params.redirect_uri)).netloc)
+
+
+def _login_page(consent: _Consent, error: str | None = None, status: int = 200) -> HTMLResponse:
     err = f'<p class="err">{html.escape(error)}</p>' if error else ""
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -425,12 +484,15 @@ def _login_page(
  button {{ flex: 1; padding: .7rem; font-size: 1rem; border-radius: 8px; border: 0; cursor: pointer; }}
  .ok {{ background: #0a84ff; color: white; }} .no {{ background: #8883; color: inherit; }}
  .err {{ color: #ff453a; opacity: 1; }}
+ .dest {{ font-size: .9rem; }}
 </style></head><body><main>
 <h1>Connect Apple Calendar</h1>
-<p><strong>{html.escape(client_name)}</strong> wants to read and change events in your calendar.
-Enter this connector's password to allow it.</p>{err}
+<p><strong>{html.escape(consent.client_name)}</strong> wants to read and change events in your calendar.
+Enter this connector's password to allow it.</p>
+<p class="dest">After you allow it, you'll go to <strong>{html.escape(consent.destination)}</strong>.
+Only continue if you started connecting there.</p>{err}
 <form method="post" action="/login">
- <input type="hidden" name="request" value="{html.escape(request_id)}">
+ <input type="hidden" name="request" value="{html.escape(consent.request_id)}">
  <input type="password" name="password" autocomplete="current-password" placeholder="Connector password" autofocus>
  <div class="row"><button class="no" name="action" value="deny">Deny</button>
  <button class="ok" name="action" value="allow">Allow</button></div>
@@ -498,34 +560,43 @@ def build_remote(
     server = RemoteServer(mcp=mcp, provider=provider, config=config)
     limiter = server.limiter
 
+    expired = "This sign-in link has expired. Start connecting again from Claude."
+
     @_route(mcp, "/login", "GET")
     async def login_form(request: Request) -> Response:
         request_id = request.query_params.get("request", "")
         found = provider.pending(request_id)
         if found is None:
-            return _message("This sign-in link has expired. Start connecting again from Claude.", 400)
-        return _login_page(request_id, found[0].client_name or "Claude")
+            return _message(expired, 400)
+        return _login_page(_Consent.of(request_id, *found))
 
     @_route(mcp, "/login", "POST")
     async def login_submit(request: Request) -> Response:
+        # The form is three short fields; refuse anything bigger before parsing it.
+        size = request.headers.get("content-length", "")
+        if not size.isdigit() or int(size) > MAX_FORM_BYTES:
+            return _message("Request too large.", 413)
+        if request.headers.get("content-type", "").split(";")[0].strip() != (
+            "application/x-www-form-urlencoded"
+        ):
+            return _message("Unsupported form.", 415)
         form = await request.form()
         request_id = str(form.get("request", ""))
         found = provider.pending(request_id)
         if found is None:
-            return _message("This sign-in link has expired. Start connecting again from Claude.", 400)
+            return _message(expired, 400)
+        consent = _Consent.of(request_id, *found)
         if form.get("action") == "deny":
             target = provider.deny(request_id)
             return RedirectResponse(target or "/", status_code=303)
         ip = request.client.host if request.client else "?"
         now = clock()
         if limiter.blocked(ip, now):
-            return _login_page(
-                request_id, found[0].client_name or "Claude", "Too many attempts. Wait 15 minutes.", 429
-            )
+            return _login_page(consent, "Too many attempts. Wait 15 minutes.", 429)
         if not hmac.compare_digest(str(form.get("password", "")).encode(), config.password.encode()):
             limiter.fail(ip, now)
             log.warning("failed connector login")
-            return _login_page(request_id, found[0].client_name or "Claude", "Wrong password.", 401)
+            return _login_page(consent, "Wrong password.", 401)
         target = provider.approve(request_id)
         log.info("connector authorised")
         return RedirectResponse(target or "/", status_code=303)

@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import Any, TypeVar
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import icalendar
 import recurring_ical_events
@@ -108,6 +108,12 @@ def _translate_errors(fn: Callable[..., T]) -> Callable[..., T]:
             raise BackendError(f"Could not reach the CalDAV server ({type(exc).__name__}).") from exc
 
     return wrapper
+
+
+def _object_href(dav_cal: Any, uid: str) -> str:
+    """URL for a new event object. UIDs can come from other people's invites,
+    so quote everything: a UID like ``../x`` must not escape the calendar."""
+    return str(dav_cal.url).rstrip("/") + "/" + quote(uid, safe="") + ".ics"
 
 
 @dataclass
@@ -436,7 +442,7 @@ class CaldavStore:
         ical.add("PRODID", PRODID)
         ical.add("VERSION", "2.0")
         ical.add_component(master)
-        href = str(dav_cal.url).rstrip("/") + "/" + str(master["UID"]) + ".ics"
+        href = _object_href(dav_cal, str(master["UID"]))
         return _Resource(calendar_id=cal.id, href=href, ical=ical)
 
     # ------------------------------------------------------------ occurrences
@@ -556,7 +562,7 @@ class CaldavStore:
                 tail.ical.add_component(ov)
         self._truncate(res, at)
         dav_cal, _ = self._calendar(res.calendar_id, for_write=True)
-        tail.href = str(dav_cal.url).rstrip("/") + "/" + tail_uid + ".ics"
+        tail.href = _object_href(dav_cal, tail_uid)
         return tail
 
     def _truncate(self, res: _Resource, at: datetime) -> None:
@@ -578,7 +584,7 @@ class CaldavStore:
             return res
         moved = _Resource(
             calendar_id=cal.id,
-            href=str(dav_cal.url).rstrip("/") + "/" + str(res.master["UID"]) + ".ics",
+            href=_object_href(dav_cal, str(res.master["UID"])),
             ical=res.ical,
         )
         self._put(moved, new=True)
