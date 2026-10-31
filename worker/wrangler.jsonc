@@ -7,7 +7,7 @@
   "observability": { "enabled": true },
   "kv_namespaces": [
     // npx wrangler kv namespace create OAUTH_KV, then paste the id here
-    { "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }
+    { "binding": "OAUTH_KV", "id": "9f5f5af5e8ce4924bad463f9760d45c5" }
   ],
   "vars": {
     // Your time zone (IANA name). Times without an offset are read in this zone.
