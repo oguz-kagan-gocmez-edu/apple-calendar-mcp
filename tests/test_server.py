@@ -20,6 +20,7 @@ READ_TOOLS = {
     "agenda",
     "find_conflicts",
     "find_duplicates",
+    "export_ics",
 }
 WRITE_TOOLS = {
     "create_event",
@@ -29,6 +30,7 @@ WRITE_TOOLS = {
     "undo_change",
     "list_changes",
     "respond_to_invitation",
+    "import_ics",
 }
 
 

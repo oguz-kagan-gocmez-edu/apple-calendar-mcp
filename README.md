@@ -36,6 +36,8 @@ Claude: ▸ agenda
 | `agenda` | A day (or up to 14) in one call: what's on now and next, all-day items, busy minutes, free gaps left, overlaps and unanswered invitations | read |
 | `find_conflicts` | Double bookings: pairs of events that overlap and both take the time | read |
 | `find_duplicates` | Events that look like copies of each other (same title, start and end), across calendars; copied repeating series come back as one group | read |
+| `export_ics` | A date range as iCalendar (.ics) text, to share or move to another app; repeating events come out as one event per occurrence | read |
+| `import_ics` | Add the events from .ics text, skipping ones already in the calendar; the whole import is one undoable change, and anything it can't represent exactly is listed with the reason | write |
 | `find_free_slots` | Gaps of at least *N* minutes within working hours, with an optional buffer around other events, skipping weekends if you want | read |
 | `create_event` | Timed or all-day events, with alarms, URL and repeat rules | write |
 | `update_event` | Partial edits. Recurring events take `span`: `this`, `future` or `all` | write |

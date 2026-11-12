@@ -36,6 +36,7 @@ from apple_calendar_mcp.store import (
 
 from .conftest import IST, NOW
 from .test_changes import TestBatch, TestUndo  # noqa: F401
+from .test_ics import FILE
 from .test_service import TestCreate as _TestCreate
 
 # Re-run the service scenarios against CalDAV (pytest collects imported classes).
@@ -332,3 +333,13 @@ def test_reply_needs_an_invitation(store: CaldavStore, radicale_url: str) -> Non
     mine = invited.create_event(EventDraft(title="Mine", start=at(3, 12), end=at(3, 13)))
     with pytest.raises(InvalidRequestError, match="isn't an invitation"):
         invited.respond_to_invitation(mine.id, "accepted", Span.ALL)
+
+
+def test_ics_import_with_removed_occurrence_and_undo(service: CalendarService) -> None:
+    r = service.import_ics(FILE, calendar_id="work")
+    assert [e.title for e in r.imported] == ["Kickoff", "Standup", "Offsite"]
+    events = service.list_events("2026-11-01", "2026-11-30").events
+    assert [e.start.day for e in events if e.title == "Standup"] == [4, 6, 7]
+    assert service.import_ics(FILE, calendar_id="work").imported == []
+    service.undo_change(r.change_id)
+    assert service.list_events("2026-11-01", "2026-11-30").count == 0

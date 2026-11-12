@@ -173,6 +173,26 @@ export interface DuplicateResult {
   groups: DuplicateGroup[];
 }
 
+export interface IcsExport {
+  range_start: number;
+  range_end: number;
+  count: number;
+  truncated: boolean;
+  ics: string;
+}
+
+export interface SkippedItem {
+  title: string;
+  reason: string;
+}
+
+export interface ImportResult {
+  /** Null if nothing was added. */
+  change_id: string | null;
+  imported: EventRef[];
+  skipped: SkippedItem[];
+}
+
 export interface Agenda {
   range_start: number;
   range_end: number;

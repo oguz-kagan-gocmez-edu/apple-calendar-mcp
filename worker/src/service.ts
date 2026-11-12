@@ -17,8 +17,11 @@ import type {
   EventList,
   EventPatch,
   FreeSlot,
+  IcsExport,
+  ImportResult,
   Recurrence,
   Reply,
+  SkippedItem,
   Span,
 } from "./models";
 import {
@@ -31,9 +34,24 @@ import {
   stepBlocker,
   stepEvent,
 } from "./changes";
+import { type IcsEvent, exportIcs, parseIcs } from "./ics";
 import { eventRef, patchIsEmpty } from "./models";
-import { type ConflictPair, busyTime, findConflicts, findDuplicates, findFreeSlots } from "./scheduling";
-import { type CalendarStore, CalendarError, InvalidRequestError } from "./store";
+import {
+  type ConflictPair,
+  busyTime,
+  duplicateKey,
+  findConflicts,
+  findDuplicates,
+  findFreeSlots,
+} from "./scheduling";
+import {
+  type CalendarStore,
+  CalendarError,
+  InvalidRequestError,
+  NotFoundError,
+  makeEventId,
+  splitEventId,
+} from "./store";
 import {
   type CivilDate,
   type Parsed,
@@ -44,6 +62,7 @@ import {
   addDays,
   at,
   compareDates,
+  formatDate,
   dayNumber,
   isDateOnly,
   isoWeek,
@@ -53,6 +72,9 @@ import {
 } from "./time";
 
 const MAX_RANGE_DAYS = 366;
+export const MAX_EXPORT_EVENTS = 500;
+export const MAX_IMPORT_EVENTS = 100;
+const MAX_ICS_CHARS = 1_000_000;
 const MAX_ALARM_MINUTES = 4 * 7 * 24 * 60; // four weeks
 const ALLOWED_URL_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 const DEFAULT_DURATION = HOUR;
@@ -558,6 +580,134 @@ export class CalendarService {
     const used: Span = before.is_recurring ? span : "this";
     await this.recordSteps([{ action: "delete", before, after: null, span: used }]);
     return { deleted: true, event_id: eventId, span: used, title: before.title };
+  }
+
+  // ------------------------------------------------------------ iCalendar
+  async exportIcs(
+    start: string,
+    end: string,
+    calendarIds?: string[] | null,
+    maxEvents = MAX_EXPORT_EVENTS,
+  ): Promise<IcsExport> {
+    const [s, e] = this.range(start, end);
+    const events = (await this.store.listEvents(s, e, calendarIds?.length ? calendarIds : null))
+      .filter((ev) => ev.status !== "canceled")
+      .sort(byStartThenTitle);
+    const kept = events.slice(0, maxEvents);
+    return {
+      range_start: s,
+      range_end: e,
+      count: kept.length,
+      truncated: events.length > kept.length,
+      ics: exportIcs(kept, this.now(), this.zone),
+    };
+  }
+
+  private icsDraft(item: IcsEvent, calendarId: string | null): EventDraft {
+    const dates = item.all_day
+      ? {
+          start: formatDate(this.zone.date(item.start)),
+          end: formatDate(addDays(this.zone.date(item.end), -1)),
+        }
+      : { start: this.zone.iso(item.start), end: this.zone.iso(item.end) };
+    return this.createDraft({
+      title: item.title,
+      ...dates,
+      all_day: item.all_day,
+      calendar_id: calendarId,
+      location: item.location,
+      notes: item.notes,
+      url: item.url,
+      alarms_minutes_before: item.alarms,
+      recurrence: item.recurrence,
+      availability: item.availability,
+    });
+  }
+
+  /** Keys of events already in the calendar around the drafts' start times. */
+  private async existingKeys(drafts: EventDraft[], calendarId: string | null): Promise<Set<string>> {
+    const keys = new Set<string>();
+    let starts = drafts.map((d) => d.start).sort((a, b) => a - b);
+    while (starts.length) {
+      const lo = starts[0]!;
+      const hi = Math.max(...starts.filter((s) => s - lo < MAX_RANGE_DAYS * DAY));
+      for (const e of await this.store.listEvents(lo, hi + DAY, calendarId ? [calendarId] : null)) {
+        keys.add(duplicateKey(e.title, e.start, e.end, e.all_day));
+      }
+      starts = starts.filter((s) => s > hi);
+    }
+    return keys;
+  }
+
+  /** Add the events in iCalendar text, as one undoable change. */
+  async importIcs(ics: string, calendarId: string | null = null, skipExisting = true): Promise<ImportResult> {
+    if (ics.length > MAX_ICS_CHARS) throw new InvalidRequestError("The iCalendar text is too large; split the file.");
+    let items: IcsEvent[];
+    let skipped: SkippedItem[];
+    try {
+      [items, skipped] = parseIcs(ics, this.zone);
+    } catch (err) {
+      if (err instanceof RangeError) throw new InvalidRequestError(err.message);
+      throw err;
+    }
+    if (items.length > MAX_IMPORT_EVENTS) {
+      throw new InvalidRequestError(
+        `The file has ${items.length} events; at most ${MAX_IMPORT_EVENTS} can be imported at once. ` +
+          "Split it into smaller files.",
+      );
+    }
+
+    let plan: [IcsEvent, EventDraft][] = [];
+    for (const item of items) {
+      try {
+        plan.push([item, this.icsDraft(item, calendarId)]);
+      } catch (err) {
+        if (!(err instanceof CalendarError)) throw err;
+        skipped.push({ title: item.title.slice(0, 200) || "(no title)", reason: `Skipped: ${err.message}` });
+      }
+    }
+
+    if (skipExisting && plan.length) {
+      const seen = await this.existingKeys(
+        plan.map(([, d]) => d),
+        calendarId,
+      );
+      const fresh: [IcsEvent, EventDraft][] = [];
+      for (const [item, draft] of plan) {
+        const key = duplicateKey(draft.title, draft.start, draft.end, draft.all_day);
+        if (seen.has(key)) {
+          skipped.push({ title: draft.title, reason: "Skipped: it is already in the calendar." });
+        } else {
+          seen.add(key);
+          fresh.push([item, draft]);
+        }
+      }
+      plan = fresh;
+    }
+
+    const steps: Step[] = [];
+    for (const [item, draft] of plan) {
+      try {
+        const created = await this.store.createEvent(draft);
+        steps.push({ action: "create", before: null, after: created, span: "this" });
+        const series = splitEventId(created.id)[0];
+        for (const removed of item.exdates) {
+          try {
+            await this.store.deleteEvent(makeEventId(series, removed), "this");
+          } catch (err) {
+            if (!(err instanceof NotFoundError)) throw err; // not one of the series' dates
+          }
+        }
+      } catch (err) {
+        const failed = await this.rollback(steps);
+        const note = failed.length
+          ? `Removing the events already added also failed for: ${failed.join(", ")}.`
+          : "Nothing was imported.";
+        throw withContext(err, `Importing "${draft.title}" failed: `, note);
+      }
+    }
+    const rec = steps.length ? await this.recordSteps(steps) : null;
+    return { change_id: rec?.id ?? null, imported: steps.map((s) => eventRef(stepEvent(s))), skipped };
   }
 
   // ------------------------------------------------------------ invitations

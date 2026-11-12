@@ -55,6 +55,13 @@ def find_conflicts(events: Iterable[Event]) -> list[tuple[Event, Event, datetime
     return found
 
 
+def duplicate_key(
+    title: str, start: datetime, end: datetime, all_day: bool
+) -> tuple[str, datetime, datetime, bool]:
+    """What two events must share to count as copies (title: case and spacing ignored)."""
+    return " ".join(title.casefold().split()), start, end, all_day
+
+
 def find_duplicates(events: Iterable[Event]) -> list[tuple[list[Event], int]]:
     """Events that look like copies of each other: ``(copies, repeats)`` per group.
 
@@ -68,7 +75,7 @@ def find_duplicates(events: Iterable[Event]) -> list[tuple[list[Event], int]]:
     for e in sorted(events, key=lambda e: (e.start, e.end, e.calendar_title, e.id)):
         if e.status == "canceled":
             continue
-        key = (" ".join(e.title.casefold().split()), e.start, e.end, e.all_day)
+        key = duplicate_key(e.title, e.start, e.end, e.all_day)
         buckets.setdefault(key, {}).setdefault(split_event_id(e.id)[0], e)
 
     groups: list[tuple[list[Event], int]] = []

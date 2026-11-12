@@ -12,13 +12,14 @@ against ``MemoryStore`` without macOS.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import date, datetime, time, timedelta, tzinfo
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
 from .changes import ChangeJournal, ChangeRecord, Step, check_unchanged, revert
+from .ics import IcsEvent, export_ics, parse_ics
 from .models import (
     Agenda,
     Availability,
@@ -40,14 +41,24 @@ from .models import (
     EventPatch,
     EventRef,
     FreeSlotResult,
+    IcsExport,
+    ImportResult,
     Recurrence,
     Reply,
+    SkippedItem,
     Span,
     TimeContext,
     UndoResult,
 )
-from .scheduling import busy_time, find_conflicts, find_duplicates, find_free_slots
-from .store import CalendarError, CalendarStore, InvalidRequestError
+from .scheduling import busy_time, duplicate_key, find_conflicts, find_duplicates, find_free_slots
+from .store import (
+    CalendarError,
+    CalendarStore,
+    InvalidRequestError,
+    NotFoundError,
+    make_event_id,
+    split_event_id,
+)
 from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
 
 MAX_RANGE = timedelta(days=366)
@@ -57,6 +68,9 @@ MAX_AGENDA_DAYS = 14
 ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
 DEFAULT_DURATION = timedelta(hours=1)
 MAX_BATCH = 25
+MAX_EXPORT_EVENTS = 500
+MAX_IMPORT_EVENTS = 100
+MAX_ICS_CHARS = 1_000_000
 
 
 def _conflict(pair: tuple[Event, Event, datetime, datetime]) -> Conflict:
@@ -574,6 +588,115 @@ class CalendarService:
             event_id=event_id,
             span=span,
             title=before.title,
+        )
+
+    # ------------------------------------------------------------ iCalendar
+    def export_ics(self, start: str, end: str, calendar_ids: list[str] | None = None) -> IcsExport:
+        s, e = self._range(start, end)
+        events = [ev for ev in self.store.list_events(s, e, calendar_ids or None) if ev.status != "canceled"]
+        kept = events[:MAX_EXPORT_EVENTS]
+        return IcsExport(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            count=len(kept),
+            truncated=len(events) > len(kept),
+            ics=export_ics(kept, self.now()),
+        )
+
+    def _ics_draft(self, item: IcsEvent, calendar_id: str | None) -> EventDraft:
+        if item.all_day:
+            start = item.start.date().isoformat()
+            end = (item.end - ONE_DAY).date().isoformat()
+        else:
+            start, end = item.start.isoformat(), item.end.isoformat()
+        return self._create_draft(
+            title=item.title,
+            start=start,
+            end=end,
+            all_day=item.all_day,
+            calendar_id=calendar_id,
+            location=item.location,
+            notes=item.notes,
+            url=item.url,
+            alarms_minutes_before=item.alarms,
+            recurrence=item.recurrence,
+            availability=item.availability,
+        )
+
+    def _existing_keys(
+        self, drafts: list[EventDraft], calendar_id: str | None
+    ) -> set[tuple[str, datetime, datetime, bool]]:
+        """Keys of events already in the calendar around the drafts' start times."""
+        keys: set[tuple[str, datetime, datetime, bool]] = set()
+        starts = sorted(d.start for d in drafts)
+        while starts:
+            lo = starts[0]
+            hi = max(s for s in starts if s - lo < MAX_RANGE)
+            found = self.store.list_events(lo, hi + ONE_DAY, [calendar_id] if calendar_id else None)
+            keys |= {duplicate_key(e.title, e.start, e.end, e.all_day) for e in found}
+            starts = [s for s in starts if s > hi]
+        return keys
+
+    def import_ics(
+        self, ics: str, calendar_id: str | None = None, skip_existing: bool = True
+    ) -> ImportResult:
+        """Add the events in iCalendar text, as one undoable change."""
+        if len(ics) > MAX_ICS_CHARS:
+            raise InvalidRequestError("The iCalendar text is too large; split the file.")
+        with _as_invalid_request():
+            items, left_out = parse_ics(ics, self.tz)
+        if len(items) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError(
+                f"The file has {len(items)} events; at most {MAX_IMPORT_EVENTS} can be imported "
+                "at once. Split it into smaller files."
+            )
+        skipped = [SkippedItem(title=s.title, reason=s.reason) for s in left_out]
+
+        plan: list[tuple[IcsEvent, EventDraft]] = []
+        for item in items:
+            try:
+                plan.append((item, self._ics_draft(item, calendar_id)))
+            except CalendarError as exc:
+                skipped.append(SkippedItem(title=item.title[:200] or "(no title)", reason=f"Skipped: {exc}"))
+
+        if skip_existing and plan:
+            seen = self._existing_keys([d for _, d in plan], calendar_id)
+            fresh: list[tuple[IcsEvent, EventDraft]] = []
+            for item, draft in plan:
+                key = duplicate_key(draft.title, draft.start, draft.end, draft.all_day)
+                if key in seen:
+                    skipped.append(
+                        SkippedItem(title=draft.title, reason="Skipped: it is already in the calendar.")
+                    )
+                else:
+                    seen.add(key)
+                    fresh.append((item, draft))
+            plan = fresh
+
+        steps: list[Step] = []
+        for item, draft in plan:
+            try:
+                created = self.store.create_event(draft)
+                steps.append(Step("create", None, created))
+                series = split_event_id(created.id)[0]
+                for removed in item.exdates:
+                    with suppress(NotFoundError):  # not one of the series' dates
+                        self.store.delete_event(make_event_id(series, removed.timestamp()), Span.THIS)
+            except CalendarError as exc:
+                failed = self._rollback(steps)
+                note = (
+                    "Nothing was imported."
+                    if not failed
+                    else f"Removing the events already added also failed for: {', '.join(failed)}."
+                )
+                raise type(exc)(f'Importing "{draft.title}" failed: {exc} {note}') from exc
+
+        rec = self._record(steps) if steps else None
+        return ImportResult(
+            change_id=rec.id if rec else None,
+            imported=[EventRef.of(s.event) for s in steps],
+            skipped=skipped,
         )
 
     # ------------------------------------------------------------ invitations
