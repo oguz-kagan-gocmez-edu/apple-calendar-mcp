@@ -47,6 +47,12 @@ Claude: ▸ agenda
 | `undo_change` | Undo the latest change (or one picked from `list_changes`), including a whole batch | destructive |
 | `list_changes` | Recent changes made through the server, and whether each can be undone | read |
 | `respond_to_invitation` | Accept, decline or tentatively accept an invitation, for the whole series or one occurrence (iCloud/CalDAV backend only) | write |
+| `list_reminder_lists` | Your Apple Reminders lists (macOS only) | read |
+| `list_reminders` | Open, completed or all reminders, soonest due first, with `overdue` marked; filter by list, due date or words | read |
+| `create_reminder` | Add a reminder with an optional due date or date and time, notes and priority | write |
+| `update_reminder` | Change title, notes, due date, priority or list; mark done or not done | write |
+| `complete_reminder` | Tick a reminder off (or back on) | write |
+| `delete_reminder` | Delete a reminder | destructive |
 
 Other parts of the design:
 
@@ -54,6 +60,7 @@ Other parts of the design:
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
 - **`--read-only` mode.** Runs the server without the write tools at all.
 - **Answer invitations.** On the iCloud (CalDAV) backend and the remote connector, `respond_to_invitation` sets your reply and iCloud tells the organizer. It needs the sign-in name to be the email address the invitation was sent to. EventKit gives apps no way to reply, so on the Mac backend the tool is not offered; answer in the Calendar app there. Replies are not in the undo log, because the organizer has already been told.
+- **Reminders, on the Mac.** The reminder tools use Apple Reminders through EventKit, with their own macOS permission that is asked for only the first time a reminder tool is used. A due time also sets an alert then, as the Reminders app does. iCloud doesn't serve reminders over CalDAV any more, so the CalDAV backend and the remote connector don't offer these tools. Reminder changes are not in the undo log. `--no-reminders` (or `APPLE_CALENDAR_NO_REMINDERS=1`) leaves the tools out, and the per-calendar access options apply to reminder lists by id or title too.
 - **Undo that won't clobber anything.** Every write is logged with the event before and after. Undo restores it exactly, or refuses: if the event was edited again since, or if the change can't be reversed exactly (edits to several occurrences of a repeating event, a deleted occurrence, a deleted invitation whose invites can't be resent). The log keeps the last 50 changes, in memory on your Mac.
 - **Per-calendar access.** Mark calendars read-only, or hide them from Claude entirely. See [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch).
 - **Prompt-injection hygiene.** The server tells the model that event text is untrusted data. Anyone who sends you an invite controls that text.
@@ -177,7 +184,7 @@ claude mcp add apple-calendar -s user -- uv --directory /Users/YOU/Projects/appl
 ### Options
 
 ```
-apple-calendar-mcp [--read-only] [--timezone Europe/Istanbul] [--log-level INFO]
+apple-calendar-mcp [--read-only] [--no-reminders] [--timezone Europe/Istanbul] [--log-level INFO]
 apple-calendar-mcp --backend memory --demo     # fake data, no Mac needed
 apple-calendar-mcp doctor
 apple-calendar-mcp install-app [--dest PATH] [--from-source]
@@ -210,7 +217,9 @@ macOS protects calendars with TCC (Transparency, Consent and Control). It asks o
 `install-app` fixes this. It builds `~/Applications/Apple Calendar MCP.app`, a tiny ad-hoc-signed bundle with no Dock icon. The bundle declares calendar access and contains a ~70-line C launcher ([`launcher.c`](src/apple_calendar_mcp/macos_helper/launcher.c)). Releases on PyPI ship that launcher prebuilt, compiled from the same commit by the [release workflow](.github/workflows/release.yml) on GitHub's macOS runners; from a git checkout it's compiled locally. Pass `--from-source` to compile it yourself either way. When the bundle is installed, `apple-calendar-mcp` re-runs itself through the launcher. The launcher makes the bundle responsible for its own permissions, so macOS asks for "Apple Calendar MCP" whichever app started the server. Your Claude config doesn't change.
 
 - Choose **Allow Full Access**. "Add Events Only" is not enough to read your events.
-- To change your answer later: **System Settings → Privacy & Security → Calendars → Apple Calendar MCP**.
+- Reminders have their own permission. macOS asks for it the first time a reminder tool runs (or when `doctor` checks reminders). A helper app installed before reminder support doesn't declare it: run `install-app` again, then `doctor`.
+- To change your answer later: **System Settings → Privacy & Security → Calendars** (or **Reminders**) **→ Apple Calendar MCP**.
+- The helper app can't read files under Desktop, Documents, Downloads or iCloud Drive, so it isn't used when the server runs from a checkout there; `doctor` says so. Move the checkout (for example to `~/src`) or install from PyPI.
 - `doctor` shows whether the helper app is in use. Set `APPLE_CALENDAR_MCP_NO_APP=1` to bypass it.
 - Rebuilding the app (for example after an upgrade) may ask for permission once more.
 - Without a GUI session (SSH, launchd), the prompt can never appear. The server times out after 30 s with a clear error instead of hanging.
@@ -375,12 +384,13 @@ CI cannot click "Allow" in a permission dialog. Before a release, run through th
 3. Create a test event. It appears in Calendar.app within a few seconds and syncs to your phone.
 4. Create a weekly test event. Move one occurrence (`this`), then rename the rest (`future`), and check Calendar.app.
 5. Delete the series (`all`).
+6. `doctor` asks for Reminders access and lists your reminder lists. Ask Claude to add a reminder for tomorrow at 9:00: it appears in Reminders.app with an alert, then complete and delete it.
 
 ## Limitations and roadmap
 
 - **No sending invitations.** Attendees can't be added or removed. Answering an invitation you received works on the iCloud (CalDAV) backend only.
 - **Recurrence subset.** Repeat rules support daily, weekly (with weekdays), monthly and yearly frequency, with an interval and a count or until date. More complex rules created in Calendar.app (for example "last Friday of the month") are reported in simplified form.
-- **Reminders** are not supported yet. EventKit exposes them through the same store, so this would be a natural next step.
+- **Reminders are macOS only.** Repeating reminders are shown but their rules can't be edited, and subtasks, tags, locations and early alerts aren't covered.
 - **Remote connector is self-hosted.** Each person runs their own copy (a free Cloudflare Worker or a server). A shared, multi-user service listed in Claude's connector directory would need encrypted per-user credential storage and Anthropic's review.
 
 ## License

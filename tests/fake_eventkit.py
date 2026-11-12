@@ -43,6 +43,41 @@ class NSURL:
         return self._s
 
 
+UNDEFINED = 2**63 - 1
+
+
+class NSTimeZone:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @classmethod
+    def timeZoneWithName_(cls, name: str) -> NSTimeZone:
+        return cls(name)
+
+    def name(self) -> str:
+        return self._name
+
+
+class NSDateComponents:
+    @classmethod
+    def alloc(cls) -> NSDateComponents:
+        return cls()
+
+    def init(self) -> NSDateComponents:
+        self._v: dict[str, Any] = {}
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("set") and name.endswith("_"):
+            key = name[3].lower() + name[4:-1]
+            return lambda value: self._v.__setitem__(key, value)
+        if name in ("year", "month", "day", "hour", "minute"):
+            return lambda: self._v.get(name, UNDEFINED)
+        if name == "timeZone":
+            return lambda: self._v.get("timeZone")
+        raise AttributeError(name)
+
+
 class NSError:
     def __init__(self, msg: str) -> None:
         self._msg = msg
@@ -81,18 +116,22 @@ class EKCalendar:
 
 
 class EKAlarm:
-    def __init__(self, offset: float) -> None:
-        self._offset = offset
+    def __init__(self, offset: float, absolute: NSDate | None = None) -> None:
+        self._offset, self._absolute = offset, absolute
 
     @classmethod
     def alarmWithRelativeOffset_(cls, offset: float) -> EKAlarm:
         return cls(offset)
 
+    @classmethod
+    def alarmWithAbsoluteDate_(cls, d: NSDate) -> EKAlarm:
+        return cls(0, d)
+
     def relativeOffset(self) -> float:
         return self._offset
 
-    def absoluteDate(self) -> None:
-        return None
+    def absoluteDate(self) -> NSDate | None:
+        return self._absolute
 
 
 class EKRecurrenceEnd:
@@ -277,15 +316,90 @@ class EKEvent:
         self._availability = v
 
 
+class EKReminder:
+    def __init__(self, store: EKEventStore) -> None:
+        self._store = store
+        self._ident: str | None = None
+        self._title = ""
+        self._notes: Any = None
+        self._due: NSDateComponents | None = None
+        self._priority = 0
+        self._completed = False
+        self._completion: NSDate | None = None
+        self._calendar: EKCalendar | None = None
+        self.alarms: list[EKAlarm] = []
+
+    @classmethod
+    def reminderWithEventStore_(cls, store: EKEventStore) -> EKReminder:
+        return cls(store)
+
+    def calendarItemIdentifier(self) -> str | None:
+        return self._ident
+
+    def title(self) -> str:
+        return self._title
+
+    def notes(self) -> Any:
+        return self._notes
+
+    def dueDateComponents(self) -> NSDateComponents | None:
+        return self._due
+
+    def priority(self) -> int:
+        return self._priority
+
+    def isCompleted(self) -> bool:
+        return self._completed
+
+    def completionDate(self) -> NSDate | None:
+        return self._completion
+
+    def calendar(self) -> EKCalendar | None:
+        return self._calendar
+
+    def hasRecurrenceRules(self) -> bool:
+        return False
+
+    def setTitle_(self, v: str) -> None:
+        self._title = v
+
+    def setNotes_(self, v: Any) -> None:
+        self._notes = v
+
+    def setDueDateComponents_(self, v: Any) -> None:
+        self._due = v
+
+    def setPriority_(self, v: int) -> None:
+        self._priority = v
+
+    def setCompleted_(self, v: bool) -> None:
+        self._completed = v
+        self._completion = NSDate(1_800_000_000) if v else None
+
+    def setCalendar_(self, v: EKCalendar) -> None:
+        self._calendar = v
+
+    def setAlarms_(self, v: Any) -> None:
+        self.alarms = list(v or [])
+
+
 class EKEventStore:
     # class-level knobs the tests flip
     status = 0  # not determined
     grant_on_request: bool | None = True  # None = never answer (simulates no GUI)
     requests = 0
     prompt_shown = True  # False = refused without a prompt (host app can't ask)
+    reminder_status = 0
+    reminder_grant: bool | None = True
+    reminder_requests = 0
 
     def __init__(self) -> None:
         self.calendars = [EKCalendar("CAL-HOME", "Home"), EKCalendar("CAL-HOL", "Holidays", writable=False)]
+        self.lists = [
+            EKCalendar("LIST-TODO", "Reminders"),
+            EKCalendar("LIST-SHARED", "Shared", writable=False),
+        ]
+        self.reminders: dict[str, EKReminder] = {}
         self.events: dict[str, EKEvent] = {}
         self.saves: list[tuple[str, int]] = []
 
@@ -298,8 +412,15 @@ class EKEventStore:
         return self
 
     @classmethod
-    def authorizationStatusForEntityType_(cls, _entity: int) -> int:
-        return cls.status
+    def authorizationStatusForEntityType_(cls, entity: int) -> int:
+        return cls.reminder_status if entity == 1 else cls.status
+
+    def requestFullAccessToRemindersWithCompletion_(self, handler: Callable[[bool, Any], None]) -> None:
+        type(self).reminder_requests += 1
+        if self.reminder_grant is None:
+            return
+        type(self).reminder_status = 3 if self.reminder_grant else 2
+        handler(self.reminder_grant, None if self.reminder_grant else NSError("User denied"))
 
     def requestFullAccessToEventsWithCompletion_(self, handler: Callable[[bool, Any], None]) -> None:
         type(self).requests += 1
@@ -315,11 +436,49 @@ class EKEventStore:
     def refreshSourcesIfNecessary(self) -> None:
         pass
 
-    def calendarsForEntityType_(self, _entity: int) -> list[EKCalendar]:
-        return self.calendars
+    def calendarsForEntityType_(self, entity: int) -> list[EKCalendar]:
+        return self.lists if entity == 1 else self.calendars
 
     def calendarWithIdentifier_(self, ident: str) -> EKCalendar | None:
-        return next((c for c in self.calendars if c.calendarIdentifier() == ident), None)
+        return next((c for c in self.calendars + self.lists if c.calendarIdentifier() == ident), None)
+
+    def defaultCalendarForNewReminders(self) -> EKCalendar:
+        return self.lists[0]
+
+    def calendarItemWithIdentifier_(self, ident: str) -> Any:
+        return self.reminders.get(ident) or self.events.get(ident)
+
+    def predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        self, _s: Any, _e: Any, cals: Any
+    ) -> Any:
+        return (False, cals)
+
+    def predicateForCompletedRemindersWithCompletionDateStarting_ending_calendars_(
+        self, _s: Any, _e: Any, cals: Any
+    ) -> Any:
+        return (True, cals)
+
+    def fetchRemindersMatchingPredicate_completion_(self, pred: Any, handler: Callable[[Any], None]) -> str:
+        done, cals = pred
+        ids = {c.calendarIdentifier() for c in cals} if cals else None
+        handler(
+            [
+                r
+                for r in self.reminders.values()
+                if r._completed == done and (ids is None or r._calendar.calendarIdentifier() in ids)  # type: ignore[union-attr]
+            ]
+        )
+        return "fetch"
+
+    def saveReminder_commit_error_(self, rem: EKReminder, commit: bool, _err: None) -> tuple[bool, Any]:
+        if rem._ident is None:
+            rem._ident = f"REM{next(_ids)}"
+        self.reminders[rem._ident] = rem
+        return True, None
+
+    def removeReminder_commit_error_(self, rem: EKReminder, commit: bool, _err: None) -> tuple[bool, Any]:
+        self.reminders.pop(rem._ident or "", None)
+        return True, None
 
     def defaultCalendarForNewEvents(self) -> EKCalendar:
         return self.calendars[0]
@@ -365,6 +524,7 @@ def install(monkeypatch: Any) -> None:
     for name, obj in {
         "EKEventStore": EKEventStore,
         "EKEvent": EKEvent,
+        "EKReminder": EKReminder,
         "EKAlarm": EKAlarm,
         "EKRecurrenceRule": EKRecurrenceRule,
         "EKRecurrenceEnd": EKRecurrenceEnd,
@@ -374,6 +534,8 @@ def install(monkeypatch: Any) -> None:
     foundation = types.ModuleType("Foundation")
     foundation.NSDate = NSDate  # type: ignore[attr-defined]
     foundation.NSURL = NSURL  # type: ignore[attr-defined]
+    foundation.NSDateComponents = NSDateComponents  # type: ignore[attr-defined]
+    foundation.NSTimeZone = NSTimeZone  # type: ignore[attr-defined]
     objc = types.ModuleType("objc")
     objc.autorelease_pool = contextlib.nullcontext  # type: ignore[attr-defined]
 

@@ -15,6 +15,7 @@ an autorelease pool so Objective-C temporaries are freed promptly.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import sys
@@ -22,13 +23,14 @@ import threading
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, ParamSpec, TypeVar
+from zoneinfo import ZoneInfo
 
 if sys.platform != "darwin":  # pragma: no cover - import guard
     raise ImportError("The EventKit backend only runs on macOS.")
 
 import EventKit as EK
 import objc
-from Foundation import NSURL, NSDate
+from Foundation import NSURL, NSDate, NSDateComponents, NSTimeZone
 
 from .models import (
     WEEKDAYS,
@@ -40,7 +42,12 @@ from .models import (
     EventDraft,
     EventPatch,
     EventStatus,
+    Priority,
     Recurrence,
+    Reminder,
+    ReminderDraft,
+    ReminderList,
+    ReminderPatch,
     Reply,
     Span,
 )
@@ -53,7 +60,7 @@ from .store import (
     make_event_id,
     split_event_id,
 )
-from .timeutil import ONE_DAY
+from .timeutil import ONE_DAY, tz_name
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +69,9 @@ R = TypeVar("R")
 
 # --- EventKit enum values (with literal fallbacks for older PyObjC builds) ----
 _ENTITY_EVENT = getattr(EK, "EKEntityTypeEvent", 0)
+_ENTITY_REMINDER = getattr(EK, "EKEntityTypeReminder", 1)
+# NSDateComponents reports unset fields as NSIntegerMax.
+_UNDEFINED = 2**63 - 1
 _AUTH_NOT_DETERMINED = getattr(EK, "EKAuthorizationStatusNotDetermined", 0)
 _AUTH_RESTRICTED = getattr(EK, "EKAuthorizationStatusRestricted", 1)
 _AUTH_DENIED = getattr(EK, "EKAuthorizationStatusDenied", 2)
@@ -87,6 +97,16 @@ _AVAILABILITY: dict[int, Availability] = {
 }
 _AVAILABILITY_REV = {v: k for k, v in _AVAILABILITY.items()}
 _STATUS: dict[int, EventStatus] = {0: "none", 1: "confirmed", 2: "tentative", 3: "canceled"}
+# EKReminder priority: 0 none, 1-4 high, 5 medium, 6-9 low.
+_PRIORITY_TO_EK: dict[Priority, int] = {"none": 0, "high": 1, "medium": 5, "low": 9}
+
+
+def _priority(value: int) -> Priority:
+    if value <= 0:
+        return "none"
+    return "high" if value < 5 else "medium" if value == 5 else "low"
+
+
 _PARTICIPANT: dict[int, AttendeeStatus] = {
     0: "unknown",
     1: "pending",
@@ -97,6 +117,12 @@ _PARTICIPANT: dict[int, AttendeeStatus] = {
     6: "completed",
     7: "in_process",
 }
+
+
+def _helper_unusable() -> str | None:
+    from . import macos_app
+
+    return macos_app.unusable_reason()
 
 
 def _eventkit_call(fn: Callable[P, R]) -> Callable[P, R]:
@@ -123,11 +149,13 @@ class EventKitStore:
         self._lock = threading.RLock()
         self._store = EK.EKEventStore.alloc().init()
         self._has_access = False
+        self._has_reminder_access = False
 
     # ------------------------------------------------------------ permission
     @staticmethod
-    def authorization_status() -> str:
-        status = EK.EKEventStore.authorizationStatusForEntityType_(_ENTITY_EVENT)
+    def authorization_status(entity: str = "events") -> str:
+        kind = _ENTITY_REMINDER if entity == "reminders" else _ENTITY_EVENT
+        status = EK.EKEventStore.authorizationStatusForEntityType_(kind)
         return {
             _AUTH_NOT_DETERMINED: "not_determined",
             _AUTH_RESTRICTED: "restricted",
@@ -186,9 +214,12 @@ class EventKitStore:
                 # Refused without ever asking: the app that started us can't
                 # show the calendar prompt (it lacks the usage description).
                 raise PermissionDeniedError(
-                    f"macOS refused calendar access without showing a prompt{detail}. The app that "
-                    "started this server cannot ask for calendar access. Run "
-                    "`apple-calendar-mcp install-app`, then `apple-calendar-mcp doctor`."
+                    f"macOS refused calendar access without showing a prompt{detail}. "
+                    + (
+                        _helper_unusable()
+                        or "The app that started this server cannot ask for calendar access. Run "
+                        "`apple-calendar-mcp install-app`, then `apple-calendar-mcp doctor`."
+                    )
                 )
             raise PermissionDeniedError(f"Calendar access was not granted{detail}.")
         # A store created before the grant may hold an empty snapshot.
@@ -494,6 +525,236 @@ class EventKitStore:
             "macOS doesn't let apps answer invitations. Answer it in the Calendar app, "
             "or use the iCloud (CalDAV) backend."
         )
+
+    # ------------------------------------------------------------ reminders
+    def ensure_reminder_access(self) -> None:
+        """Full access to Reminders, asked for separately and only when a reminder tool is used."""
+        if self._has_reminder_access:
+            return
+        status = self.authorization_status("reminders")
+        if status == "full_access":
+            self._has_reminder_access = True
+            return
+        if status in ("denied", "restricted", "write_only"):
+            raise PermissionDeniedError(
+                "Reminders access is off. Enable Full Access for the app running this server under "
+                "System Settings > Privacy & Security > Reminders, then restart that app."
+            )
+        done = threading.Event()
+        result: dict[str, Any] = {}
+
+        def handler(granted: bool, error: Any) -> None:
+            result["granted"] = bool(granted)
+            result["error"] = error
+            done.set()
+
+        if hasattr(self._store, "requestFullAccessToRemindersWithCompletion_"):  # macOS 14+
+            self._store.requestFullAccessToRemindersWithCompletion_(handler)
+        else:
+            self._store.requestAccessToEntityType_completion_(_ENTITY_REMINDER, handler)
+        if not done.wait(self.access_timeout):
+            raise PermissionDeniedError(
+                "Timed out waiting for the macOS Reminders permission prompt. Run "
+                "`apple-calendar-mcp doctor` in Terminal, or grant access under "
+                "System Settings > Privacy & Security > Reminders."
+            )
+        if not result.get("granted"):
+            err = result.get("error")
+            detail = f" ({err.localizedDescription()})" if err is not None else ""
+            if self.authorization_status("reminders") == "not_determined":
+                raise PermissionDeniedError(
+                    f"macOS refused Reminders access without showing a prompt{detail}. "
+                    + (
+                        _helper_unusable()
+                        or "Reinstall the helper app so it can ask (`apple-calendar-mcp install-app`), "
+                        "then run `apple-calendar-mcp doctor`."
+                    )
+                )
+            raise PermissionDeniedError(f"Reminders access was not granted{detail}.")
+        self._store.reset()
+        self._has_reminder_access = True
+
+    def _components(self, when: datetime, all_day: bool) -> Any:
+        local = when.astimezone(self.tz)
+        comps = NSDateComponents.alloc().init()
+        comps.setYear_(local.year)
+        comps.setMonth_(local.month)
+        comps.setDay_(local.day)
+        if not all_day:
+            comps.setHour_(local.hour)
+            comps.setMinute_(local.minute)
+            comps.setTimeZone_(NSTimeZone.timeZoneWithName_(tz_name(self.tz)))
+        return comps
+
+    def _from_components(self, comps: Any) -> tuple[datetime | None, bool]:
+        if comps is None or comps.year() in (None, _UNDEFINED):
+            return None, False
+        day = date(int(comps.year()), int(comps.month()), int(comps.day()))
+        hour = comps.hour()
+        if hour in (None, _UNDEFINED):
+            return datetime.combine(day, time.min, tzinfo=self.tz), True
+        minute = comps.minute()
+        zone_name = comps.timeZone().name() if comps.timeZone() is not None else None
+        zone: tzinfo = self.tz
+        if zone_name:
+            with contextlib.suppress(KeyError, ValueError):
+                zone = ZoneInfo(str(zone_name))
+        moment = datetime.combine(
+            day, time(int(hour), 0 if minute in (None, _UNDEFINED) else int(minute)), tzinfo=zone
+        )
+        return moment.astimezone(self.tz), False
+
+    def _to_list(self, cal: Any, default_id: str | None) -> ReminderList:
+        c = self._to_calendar(cal, default_id)
+        return ReminderList(
+            id=c.id,
+            title=c.title,
+            source=c.source,
+            color=c.color,
+            writable=c.writable,
+            is_default=c.is_default,
+        )
+
+    def _to_reminder(self, rem: Any) -> Reminder:
+        due, all_day = self._from_components(rem.dueDateComponents())
+        done_at = rem.completionDate()
+        cal = rem.calendar()
+        return Reminder(
+            id=str(rem.calendarItemIdentifier()),
+            list_id=str(cal.calendarIdentifier()),
+            list_title=str(cal.title()),
+            title=str(rem.title() or "(No title)"),
+            notes=str(rem.notes()) if rem.notes() else None,
+            due=due,
+            due_all_day=all_day,
+            priority=_priority(int(rem.priority())),
+            completed=bool(rem.isCompleted()),
+            completed_at=self._py(done_at).replace(microsecond=0) if done_at is not None else None,
+            is_recurring=bool(rem.hasRecurrenceRules()),
+        )
+
+    def _reminder_list(self, list_id: str | None, *, for_write: bool) -> Any:
+        if list_id is None:
+            cal = self._store.defaultCalendarForNewReminders()
+            if cal is None:
+                raise InvalidRequestError("No default reminder list is set; pass list_id.")
+        else:
+            cal = self._store.calendarWithIdentifier_(list_id)
+            if cal is None or list_id not in {
+                str(c.calendarIdentifier())
+                for c in self._store.calendarsForEntityType_(_ENTITY_REMINDER) or []
+            }:
+                raise NotFoundError(f"No reminder list with id {list_id!r}.")
+        if for_write and not cal.allowsContentModifications():
+            raise ReadOnlyCalendarError(f"Reminder list {cal.title()!r} is read-only.")
+        return cal
+
+    def _find_reminder(self, reminder_id: str) -> Any:
+        item = self._store.calendarItemWithIdentifier_(reminder_id)
+        if item is None or not hasattr(item, "isCompleted"):
+            raise NotFoundError(f"No reminder with id {reminder_id!r}.")
+        return item
+
+    def _fetch(self, predicate: Any) -> list[Any]:
+        done = threading.Event()
+        found: list[Any] = []
+
+        def handler(reminders: Any) -> None:
+            found.extend(reminders or [])
+            done.set()
+
+        self._store.fetchRemindersMatchingPredicate_completion_(predicate, handler)
+        if not done.wait(30):
+            raise BackendError("Reading reminders timed out.")
+        return found
+
+    def _set_due(self, rem: Any, due: datetime | None, all_day: bool) -> None:
+        rem.setDueDateComponents_(self._components(due, all_day) if due is not None else None)
+        # Like the Reminders app: a timed due gets an alert at that time.
+        rem.setAlarms_([EK.EKAlarm.alarmWithAbsoluteDate_(self._ns(due))] if due and not all_day else [])
+
+    def _save_reminder(self, rem: Any) -> None:
+        ok, err = self._store.saveReminder_commit_error_(rem, True, None)
+        if not ok:
+            raise BackendError(f"Saving failed: {err.localizedDescription() if err else 'unknown error'}")
+
+    def list_reminder_lists(self) -> list[ReminderList]:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            default = self._store.defaultCalendarForNewReminders()
+            default_id = str(default.calendarIdentifier()) if default is not None else None
+            cals = self._store.calendarsForEntityType_(_ENTITY_REMINDER) or []
+            return sorted(
+                (self._to_list(c, default_id) for c in cals), key=lambda x: (x.source or "", x.title)
+            )
+
+    def list_reminders(self, list_ids: list[str] | None, *, completed: bool) -> list[Reminder]:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            cals = [self._reminder_list(lid, for_write=False) for lid in list_ids] if list_ids else None
+            if completed:
+                pred = self._store.predicateForCompletedRemindersWithCompletionDateStarting_ending_calendars_(
+                    None, None, cals
+                )
+            else:
+                pred = self._store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+                    None, None, cals
+                )
+            return [self._to_reminder(r) for r in self._fetch(pred)]
+
+    def get_reminder(self, reminder_id: str) -> Reminder:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            return self._to_reminder(self._find_reminder(reminder_id))
+
+    def create_reminder(self, draft: ReminderDraft) -> Reminder:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            cal = self._reminder_list(draft.list_id, for_write=True)
+            rem = EK.EKReminder.reminderWithEventStore_(self._store)
+            rem.setCalendar_(cal)
+            rem.setTitle_(draft.title)
+            if draft.notes:
+                rem.setNotes_(draft.notes)
+            rem.setPriority_(_PRIORITY_TO_EK[draft.priority])
+            self._set_due(rem, draft.due, draft.due_all_day)
+            self._save_reminder(rem)
+            return self._to_reminder(rem)
+
+    def update_reminder(self, reminder_id: str, patch: ReminderPatch) -> Reminder:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            rem = self._find_reminder(reminder_id)
+            self._reminder_list(str(rem.calendar().calendarIdentifier()), for_write=True)
+            if patch.title is not None:
+                rem.setTitle_(patch.title)
+            if patch.notes is not None:
+                rem.setNotes_(patch.notes or None)
+            if patch.clear_due:
+                self._set_due(rem, None, False)
+            elif patch.due is not None:
+                self._set_due(rem, patch.due, patch.due_all_day)
+            if patch.priority is not None:
+                rem.setPriority_(_PRIORITY_TO_EK[patch.priority])
+            if patch.completed is not None:
+                rem.setCompleted_(patch.completed)
+            if patch.list_id is not None:
+                rem.setCalendar_(self._reminder_list(patch.list_id, for_write=True))
+            self._save_reminder(rem)
+            return self._to_reminder(rem)
+
+    def delete_reminder(self, reminder_id: str) -> Reminder:
+        with self._lock, objc.autorelease_pool():
+            self.ensure_reminder_access()
+            rem = self._find_reminder(reminder_id)
+            self._reminder_list(str(rem.calendar().calendarIdentifier()), for_write=True)
+            before = self._to_reminder(rem)
+            ok, err = self._store.removeReminder_commit_error_(rem, True, None)
+            if not ok:
+                raise BackendError(
+                    f"Deleting failed: {err.localizedDescription() if err else 'unknown error'}"
+                )
+            return before
 
 
 def _mailto(url: Any) -> str | None:

@@ -46,7 +46,15 @@ from .models import (
     FreeSlotResult,
     IcsExport,
     ImportResult,
+    Priority,
     Recurrence,
+    Reminder,
+    ReminderDeleted,
+    ReminderDraft,
+    ReminderList,
+    ReminderPatch,
+    ReminderResult,
+    ReminderStatus,
     Reply,
     SkippedItem,
     Span,
@@ -55,6 +63,7 @@ from .models import (
     UndoResult,
     WeekdayStats,
 )
+from .reminders import ReminderStore, is_overdue
 from .scheduling import (
     blocks_time,
     busy_time,
@@ -121,8 +130,10 @@ class CalendarService:
         store: CalendarStore,
         tz: tzinfo,
         clock: Callable[[], datetime] | None = None,
+        reminders: ReminderStore | None = None,
     ) -> None:
         self.store = store
+        self.reminders = reminders
         self.tz = tz
         self._clock = clock or (lambda: datetime.now(tz))
         self.journal = ChangeJournal()
@@ -705,6 +716,135 @@ class CalendarService:
             span=span,
             title=before.title,
         )
+
+    # ------------------------------------------------------------ reminders
+    @property
+    def has_reminders(self) -> bool:
+        return self.reminders is not None
+
+    def _reminder_store(self) -> ReminderStore:
+        if self.reminders is None:
+            raise InvalidRequestError(
+                "Reminders aren't available here: only the macOS (EventKit) backend can reach them."
+            )
+        return self.reminders
+
+    def _with_overdue(self, r: Reminder) -> Reminder:
+        return r.model_copy(update={"overdue": is_overdue(r, self.now())})
+
+    def _due(self, value: str) -> tuple[datetime, bool]:
+        """A due date or date-time; a bare date means 'that day', with no time."""
+        return self._parse(value, "due"), is_date_only(value)
+
+    @staticmethod
+    def _reminder_title(title: str) -> str:
+        title = title.strip()
+        if not title:
+            raise InvalidRequestError("title must not be empty.")
+        return title
+
+    def list_reminder_lists(self) -> list[ReminderList]:
+        return self._reminder_store().list_reminder_lists()
+
+    def list_reminders(
+        self,
+        list_ids: list[str] | None = None,
+        status: ReminderStatus = "open",
+        due_before: str | None = None,
+        query: str | None = None,
+        limit: int = 200,
+    ) -> ReminderResult:
+        store = self._reminder_store()
+        limit = self._limit(limit)
+        found: list[Reminder] = []
+        if status in ("open", "all"):
+            found += store.list_reminders(list_ids or None, completed=False)
+        if status in ("completed", "all"):
+            found += store.list_reminders(list_ids or None, completed=True)
+        if due_before:
+            cutoff = self._parse(due_before, "due_before")
+            if is_date_only(due_before):
+                cutoff += ONE_DAY  # the whole day counts
+            found = [r for r in found if r.due is not None and r.due < cutoff]
+        if query and query.strip():
+            terms = query.casefold().split()
+            found = [r for r in found if all(t in f"{r.title} {r.notes or ''}".casefold() for t in terms)]
+        rank = {"high": 0, "medium": 1, "low": 2, "none": 3}
+        far = datetime.max.replace(tzinfo=self.tz)
+        found.sort(
+            key=lambda r: (
+                r.completed,
+                r.due is None,
+                r.due or far,
+                rank[r.priority],
+                r.title.casefold(),
+            )
+        )
+        return ReminderResult(
+            timezone=tz_name(self.tz),
+            count=min(len(found), limit),
+            truncated=len(found) > limit,
+            reminders=[self._with_overdue(r) for r in found[:limit]],
+        )
+
+    def get_reminder(self, reminder_id: str) -> Reminder:
+        return self._with_overdue(self._reminder_store().get_reminder(reminder_id))
+
+    def create_reminder(
+        self,
+        title: str,
+        list_id: str | None = None,
+        due: str | None = None,
+        notes: str | None = None,
+        priority: Priority = "none",
+    ) -> Reminder:
+        store = self._reminder_store()
+        when, all_day = self._due(due) if due else (None, False)
+        draft = ReminderDraft(
+            title=self._reminder_title(title),
+            list_id=list_id,
+            notes=notes or None,
+            due=when,
+            due_all_day=all_day,
+            priority=priority,
+        )
+        return self._with_overdue(store.create_reminder(draft))
+
+    def update_reminder(
+        self,
+        reminder_id: str,
+        title: str | None = None,
+        list_id: str | None = None,
+        due: str | None = None,
+        clear_due: bool = False,
+        notes: str | None = None,
+        priority: Priority | None = None,
+        completed: bool | None = None,
+    ) -> Reminder:
+        store = self._reminder_store()
+        if due is not None and clear_due:
+            raise InvalidRequestError("Pass either due or clear_due, not both.")
+        when, all_day = self._due(due) if due else (None, False)
+        patch = ReminderPatch(
+            title=self._reminder_title(title) if title is not None else None,
+            list_id=list_id,
+            notes=notes,
+            due=when,
+            due_all_day=all_day,
+            clear_due=clear_due,
+            priority=priority,
+            completed=completed,
+        )
+        if patch.is_empty():
+            raise InvalidRequestError("Nothing to update: pass at least one field.")
+        return self._with_overdue(store.update_reminder(reminder_id, patch))
+
+    def complete_reminder(self, reminder_id: str, completed: bool = True) -> Reminder:
+        return self.update_reminder(reminder_id, completed=completed)
+
+    def delete_reminder(self, reminder_id: str) -> ReminderDeleted:
+        before = self._reminder_store().delete_reminder(reminder_id)
+        return ReminderDeleted(deleted=True, reminder_id=reminder_id, title=before.title)
 
     # ------------------------------------------------------------ iCalendar
     def export_ics(self, start: str, end: str, calendar_ids: list[str] | None = None) -> IcsExport:

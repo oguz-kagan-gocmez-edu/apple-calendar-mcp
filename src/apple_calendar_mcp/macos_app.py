@@ -37,6 +37,7 @@ VIA_APP_ENV = "APPLE_CALENDAR_MCP_VIA_APP"
 NO_APP_ENV = "APPLE_CALENDAR_MCP_NO_APP"
 
 USAGE_TEXT = "Lets Claude read and manage your calendar events through the apple-calendar-mcp server."
+REMINDERS_USAGE_TEXT = "Lets Claude read and manage your reminders through the apple-calendar-mcp server."
 
 Runner = Callable[..., Any]
 
@@ -61,6 +62,8 @@ def info_plist() -> bytes:
             "LSUIElement": True,  # no Dock icon
             "NSCalendarsFullAccessUsageDescription": USAGE_TEXT,  # macOS 14+
             "NSCalendarsUsageDescription": USAGE_TEXT,  # macOS 13
+            "NSRemindersFullAccessUsageDescription": REMINDERS_USAGE_TEXT,  # macOS 14+
+            "NSRemindersUsageDescription": REMINDERS_USAGE_TEXT,  # macOS 13
         }
     )
 
@@ -133,11 +136,42 @@ def build_app(
     return app, "prebuilt" if prebuilt is not None else "compiled"
 
 
+# Folders macOS guards per app (TCC). The helper app has no access to them, so
+# it can't start a Python that lives there; it fails before our code runs.
+PROTECTED_FOLDERS = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
+
+
+def code_paths() -> list[Path]:
+    """Where the running server's Python environment and code live."""
+    return [Path(sys.prefix), Path(__file__).resolve().parent]
+
+
+def protected_folder(paths: Sequence[Path] | None = None, home: Path | None = None) -> Path | None:
+    """The macOS-protected folder holding this server's files, if any (None: the helper can run it)."""
+    home = (home or Path.home()).resolve()
+    for path in code_paths() if paths is None else paths:
+        resolved = path.resolve()
+        for name in PROTECTED_FOLDERS:
+            folder = home / name
+            if resolved == folder or folder in resolved.parents:
+                return folder
+    return None
+
+
+def blocked_message(folder: Path) -> str:
+    return (
+        f"The helper app can't be used: this server runs from {folder}, which macOS doesn't let "
+        "the helper read. Move the checkout out of Desktop, Documents and Downloads (e.g. to "
+        "~/src), or install from PyPI (`uvx apple-calendar-eventkit-mcp`)."
+    )
+
+
 def relaunch_command(
     argv: Sequence[str],
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     app: Path | None = None,
+    paths: Sequence[Path] | None = None,
 ) -> list[str] | None:
     """The command that re-runs this CLI through the helper app, or None to run as is."""
     env = os.environ if env is None else env
@@ -147,7 +181,19 @@ def relaunch_command(
     launcher = launcher_path(app or default_app_path())
     if not os.access(launcher, os.X_OK):
         return None
+    if protected_folder(paths) is not None:
+        return None
     return [str(launcher), sys.executable, "-m", "apple_calendar_mcp", *argv]
+
+
+def helper_installed(app: Path | None = None) -> bool:
+    return os.access(launcher_path(app or default_app_path()), os.X_OK)
+
+
+def unusable_reason() -> str | None:
+    """Why an installed helper app can't run this server, or None."""
+    folder = protected_folder()
+    return blocked_message(folder) if folder is not None and helper_installed() else None
 
 
 def relaunch(cmd: list[str]) -> None:  # pragma: no cover - replaces the process
