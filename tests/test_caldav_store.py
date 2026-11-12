@@ -30,6 +30,7 @@ from apple_calendar_mcp.service import CalendarService
 from apple_calendar_mcp.store import BackendError, NotFoundError, PermissionDeniedError
 
 from .conftest import IST, NOW
+from .test_changes import TestBatch, TestUndo  # noqa: F401
 from .test_service import TestCreate as _TestCreate
 
 # Re-run the service scenarios against CalDAV (pytest collects imported classes).
@@ -171,6 +172,20 @@ def test_rrule_written_in_rfc_form(store: CaldavStore) -> None:
         frequency="weekly", days_of_week=["mon", "thu"], until=datetime(2026, 11, 30).date()
     )
     assert len(store.list_events(at(1, 0), at(30, 23))) == 9
+
+
+@pytest.mark.parametrize(
+    "rec",
+    [
+        Recurrence(frequency="weekly", count=4),
+        Recurrence(
+            frequency="weekly", interval=2, days_of_week=["mon", "wed"], until=datetime(2026, 12, 31).date()
+        ),
+    ],
+)
+def test_created_series_reports_its_rule(store: CaldavStore, rec: Recurrence) -> None:
+    e = store.create_event(EventDraft(title="Lecture", start=at(2, 10), end=at(2, 11), recurrence=rec))
+    assert e.recurrence == rec == store.get_event(e.id).recurrence
 
 
 def test_this_edit_creates_override_and_delete_adds_exdate(store: CaldavStore) -> None:

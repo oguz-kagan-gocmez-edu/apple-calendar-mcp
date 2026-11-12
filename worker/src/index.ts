@@ -13,6 +13,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { AccessControlledStore, AccessPolicy } from "./access";
 import { SCOPE, message, passwordProblem, showLogin, submitLogin } from "./auth";
 import { CaldavStore } from "./caldav/store";
+import { KvJournal } from "./changes";
 import type { Env } from "./env";
 import { MemoryStore } from "./memory-store";
 import { CalendarService } from "./service";
@@ -71,7 +72,7 @@ const api: ExportedHandler<Env> = {
     const auth = (ctx as ExecutionContext & { auth: OAuthResourceAuth }).auth;
     if (!auth.scope.includes(SCOPE)) return insufficientScope(auth, [SCOPE]);
     const zone = zoneOf(env);
-    const service = new CalendarService(storeOf(env, zone), zone);
+    const service = new CalendarService(storeOf(env, zone), zone, Date.now, new KvJournal(env.OAUTH_KV));
     const host = new URL(request.url).hostname;
     const handler = createMcpHandler(() => buildServer(service, { readOnly: env.READ_ONLY === "1" }), {
       route: "/mcp",

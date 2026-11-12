@@ -19,9 +19,19 @@ import type {
   Recurrence,
   Span,
 } from "./models";
+import {
+  type ChangeJournal,
+  MemoryJournal,
+  type Step,
+  checkUnchanged,
+  recordBlocker,
+  revert,
+  stepBlocker,
+  stepEvent,
+} from "./changes";
 import { eventRef, patchIsEmpty } from "./models";
 import { type ConflictPair, busyTime, findConflicts, findFreeSlots } from "./scheduling";
-import { type CalendarStore, InvalidRequestError } from "./store";
+import { type CalendarStore, CalendarError, InvalidRequestError } from "./store";
 import {
   type CivilDate,
   type Parsed,
@@ -46,6 +56,7 @@ const ALLOWED_URL_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 const DEFAULT_DURATION = HOUR;
 const MAX_BUFFER_MINUTES = 240;
 const MAX_AGENDA_DAYS = 14;
+const MAX_BATCH = 25;
 
 function conflict([a, b, start, end]: ConflictPair): Conflict {
   return { start, end, overlap_minutes: Math.floor((end - start) / MINUTE), events: [eventRef(a), eventRef(b)] };
@@ -111,11 +122,44 @@ export interface AgendaInput {
   min_free_minutes?: number;
 }
 
+export interface ChangeInfo {
+  change_id: string;
+  at: number;
+  summary: string;
+  can_undo: boolean;
+  why_not: string | null;
+}
+
+export interface UndoResult {
+  change_id: string;
+  summary: string;
+  restored: Event[];
+  removed_ids: string[];
+}
+
+export type BatchChange =
+  | ({ action: "create" } & CreateInput)
+  | ({ action: "update" } & Omit<UpdateInput, "span" | "recurrence" | "remove_recurrence">)
+  | { action: "delete"; event_id: string };
+
+export interface BatchResult {
+  change_id: string;
+  results: { action: Step["action"]; event: Event }[];
+}
+
+/** Rethrow a domain error with context, keeping its type. */
+function withContext(err: unknown, prefix: string, suffix: string): unknown {
+  if (!(err instanceof CalendarError)) return err;
+  const out = new (err.constructor as new (m: string) => CalendarError)(`${prefix}${err.message} ${suffix}`);
+  return out;
+}
+
 export class CalendarService {
   constructor(
     readonly store: CalendarStore,
     readonly zone: Zone,
     private readonly clock: () => number = Date.now,
+    readonly journal: ChangeJournal = new MemoryJournal(),
   ) {}
 
   // ------------------------------------------------------------ helpers
@@ -358,6 +402,12 @@ export class CalendarService {
 
   // ------------------------------------------------------------ commands
   async createEvent(input: CreateInput): Promise<Event> {
+    const created = await this.store.createEvent(this.createDraft(input));
+    await this.recordSteps([{ action: "create", before: null, after: created, span: "this" }]);
+    return created;
+  }
+
+  private createDraft(input: CreateInput): EventDraft {
     const title = input.title.trim();
     if (!title) throw new InvalidRequestError("title must not be empty.");
     if (input.end != null && input.duration_minutes != null) {
@@ -396,11 +446,18 @@ export class CalendarService {
       recurrence: input.recurrence ?? null,
       availability: input.availability ?? null,
     };
-    return this.store.createEvent(draft);
+    return draft;
   }
 
   async updateEvent(input: UpdateInput): Promise<Event> {
     const current = await this.store.getEvent(input.event_id);
+    const [patch, span] = this.updatePatch(current, input);
+    const updated = await this.store.updateEvent(input.event_id, patch, span);
+    await this.recordSteps([{ action: "update", before: current, after: updated, span }]);
+    return updated;
+  }
+
+  private updatePatch(current: Event, input: Omit<UpdateInput, "event_id">): [EventPatch, Span] {
     let span: Span = input.span ?? "this";
     if (!current.is_recurring) span = "this"; // spans only mean something for series
     const removeRecurrence = input.remove_recurrence ?? false;
@@ -432,7 +489,7 @@ export class CalendarService {
     if (patchIsEmpty(patch)) {
       throw new InvalidRequestError("Nothing to update: pass at least one field to change.");
     }
-    return this.store.updateEvent(input.event_id, patch, span);
+    return [patch, span];
   }
 
   /** Absolute new start/end, keeping the duration when only one moves. [null, null] = no change. */
@@ -469,7 +526,109 @@ export class CalendarService {
 
   async deleteEvent(eventId: string, span: Span = "this"): Promise<DeleteResult> {
     const before = await this.store.deleteEvent(eventId, span);
-    return { deleted: true, event_id: eventId, span: before.is_recurring ? span : "this", title: before.title };
+    const used: Span = before.is_recurring ? span : "this";
+    await this.recordSteps([{ action: "delete", before, after: null, span: used }]);
+    return { deleted: true, event_id: eventId, span: used, title: before.title };
+  }
+
+  // ------------------------------------------------------------ change log
+  private recordSteps(steps: Step[]) {
+    return this.journal.record(steps, Math.floor(this.now() / 1000) * 1000);
+  }
+
+  async listChanges(): Promise<ChangeInfo[]> {
+    return (await this.journal.recent()).map((r) => {
+      const why = recordBlocker(r);
+      return { change_id: r.id, at: r.at, summary: r.summary, can_undo: why === null, why_not: why };
+    });
+  }
+
+  async undoChange(changeId?: string | null): Promise<UndoResult> {
+    const rec = await this.journal.get(changeId ?? null);
+    const why = recordBlocker(rec);
+    if (why) throw new InvalidRequestError(`Can't undo ${rec.summary}: ${why}`);
+    for (const step of rec.steps) await checkUnchanged(this.store, step); // check before touching anything
+    const restored: Event[] = [];
+    const removed: string[] = [];
+    for (const step of [...rec.steps].reverse()) {
+      const [event, gone] = await revert(this.store, step);
+      if (event) restored.unshift(event);
+      if (gone) removed.push(gone);
+    }
+    await this.journal.remove(rec.id);
+    return { change_id: rec.id, summary: rec.summary, restored, removed_ids: removed };
+  }
+
+  /** Apply creates, updates and deletes all-or-nothing, as one undoable change. */
+  async applyChanges(changes: BatchChange[]): Promise<BatchResult> {
+    if (changes.length < 1 || changes.length > MAX_BATCH) {
+      throw new InvalidRequestError(`Pass between 1 and ${MAX_BATCH} changes.`);
+    }
+    const ids = changes.flatMap((c) => (c.action === "create" ? [] : [c.event_id]));
+    if (new Set(ids).size !== ids.length) throw new InvalidRequestError("Each event may appear only once in a batch.");
+
+    // 1. Validate everything (and read current state) before writing anything.
+    type Planned =
+      | { action: "create"; draft: EventDraft }
+      | { action: "update"; before: Event; patch: EventPatch }
+      | { action: "delete"; before: Event };
+    const plan: Planned[] = [];
+    for (const [i, c] of changes.entries()) {
+      try {
+        if (c.action === "create") {
+          plan.push({ action: "create", draft: this.createDraft(c) });
+          continue;
+        }
+        const before = await this.store.getEvent(c.event_id);
+        if (c.action === "delete") {
+          const why = stepBlocker({ action: "delete", before, after: null, span: "this" });
+          if (why) throw new InvalidRequestError(`${why} Delete it on its own with delete_event.`);
+          plan.push({ action: "delete", before });
+        } else {
+          const [patch] = this.updatePatch(before, { ...c, span: "this" });
+          plan.push({ action: "update", before, patch });
+        }
+      } catch (err) {
+        throw withContext(err, `Change ${i + 1} (${c.action}): `, "Nothing was changed.");
+      }
+    }
+
+    // 2. Apply in order; on failure, roll back what was done.
+    const steps: Step[] = [];
+    for (const [i, p] of plan.entries()) {
+      try {
+        if (p.action === "create") {
+          steps.push({ action: "create", before: null, after: await this.store.createEvent(p.draft), span: "this" });
+        } else if (p.action === "delete") {
+          const before = await this.store.deleteEvent(p.before.id, "this");
+          steps.push({ action: "delete", before, after: null, span: "this" });
+        } else {
+          const after = await this.store.updateEvent(p.before.id, p.patch, "this");
+          steps.push({ action: "update", before: p.before, after, span: "this" });
+        }
+      } catch (err) {
+        const failed = await this.rollback(steps);
+        const note = failed.length
+          ? `Rolling back the earlier changes also failed for: ${failed.join(", ")}.`
+          : "The earlier changes were rolled back.";
+        throw withContext(err, `Change ${i + 1} (${p.action}): `, note);
+      }
+    }
+    const rec = await this.recordSteps(steps);
+    return { change_id: rec.id, results: steps.map((s) => ({ action: s.action, event: stepEvent(s) })) };
+  }
+
+  private async rollback(steps: Step[]): Promise<string[]> {
+    const failed: string[] = [];
+    for (const step of [...steps].reverse()) {
+      try {
+        await revert(this.store, step);
+      } catch (err) {
+        if (!(err instanceof CalendarError)) throw err;
+        failed.push(`"${stepEvent(step).title}"`);
+      }
+    }
+    return failed;
   }
 }
 

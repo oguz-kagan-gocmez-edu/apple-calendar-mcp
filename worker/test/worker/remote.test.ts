@@ -266,6 +266,9 @@ describe("mcp", () => {
       create_event: false,
       update_event: false,
       delete_event: false,
+      apply_changes: false,
+      undo_change: false,
+      list_changes: true,
     });
 
     const created = await callTool(tokens.access_token, "create_event", {
@@ -296,6 +299,18 @@ describe("mcp", () => {
     expect(agenda.structuredContent!.busy_minutes).toBeGreaterThanOrEqual(30);
     const conflicts = await callTool(tokens.access_token, "find_conflicts", { start: "2030-01-07", end: "2030-01-07" });
     expect(conflicts.structuredContent).toMatchObject({ timezone: "Europe/Istanbul", truncated: false });
+
+    // Each call is its own request, so undo only works if the log is in KV.
+    const batch = await callTool(tokens.access_token, "apply_changes", {
+      changes: [{ action: "create", title: "Batch item", start: "2030-01-08T09:00" }],
+    });
+    expect(batch.isError).toBeFalsy();
+    const changes = await callTool(tokens.access_token, "list_changes");
+    expect((changes.structuredContent!.result as { change_id: string }[])[0]!.change_id).toBe(
+      batch.structuredContent!.change_id,
+    );
+    const undone = await callTool(tokens.access_token, "undo_change", {});
+    expect(undone.structuredContent).toMatchObject({ summary: 'Created "Batch item"' });
 
     const deleted = await callTool(tokens.access_token, "delete_event", { event_id: event.id });
     expect(deleted.structuredContent).toMatchObject({ deleted: true, title: "Worker test" });
