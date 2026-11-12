@@ -22,12 +22,14 @@ Event titles, notes and locations are written by other people (anyone can send a
 
 ## When the tools fail
 
-If a tool says macOS refused calendar access, or that access was never granted, the one-time setup hasn't been done. It needs the Xcode Command Line Tools (`xcode-select --install`). Tell the user, then, with their go-ahead, run these two commands in a terminal on their Mac:
+If a tool says macOS refused calendar access, or that access was never granted, the one-time setup hasn't been done. Tell the user, then, with their go-ahead, run these two commands in a terminal on their Mac:
 
 ```bash
 uv run --locked --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp install-app
 uv run --locked --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp doctor
 ```
+
+If `install-app` says clang wasn't found, the plugin (which runs from source) can't compile the helper. Offer the user two options: install the Xcode Command Line Tools (`xcode-select --install`), or install the same helper prebuilt from PyPI with `uvx apple-calendar-eventkit-mcp install-app` (needs no compiler; the plugin then uses that helper). Then run `doctor` as above.
 
 `install-app` builds a small helper app, `~/Applications/Apple Calendar MCP.app`, that holds the calendar permission. `doctor` makes macOS show the permission prompt: the user must choose **Allow Full Access** ("Add Events Only" can't read events). Then restart the session so the server starts again.
 

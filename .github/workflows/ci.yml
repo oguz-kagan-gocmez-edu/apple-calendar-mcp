@@ -36,12 +36,29 @@ jobs:
       # to show the permission prompt.
       - if: runner.os == 'macOS'
         run: uv run python -c "import apple_calendar_mcp.eventkit_store as m; print(m.EventKitStore.authorization_status())"
-      # Build the helper app bundle for real and check its signature and launcher.
+      # Build the helper app bundle for real, from source (as a git checkout
+      # does), and check its signature and launcher.
       - if: runner.os == 'macOS'
         run: |
-          uv run apple-calendar-mcp install-app --dest "$RUNNER_TEMP/Apple Calendar MCP.app"
+          set -euo pipefail
+          out="$(uv run apple-calendar-mcp install-app --dest "$RUNNER_TEMP/Apple Calendar MCP.app")"
+          echo "$out"; grep -q "compiled from source" <<<"$out"
           codesign --verify --verbose "$RUNNER_TEMP/Apple Calendar MCP.app"
           "$RUNNER_TEMP/Apple Calendar MCP.app/Contents/MacOS/apple-calendar-mcp-launcher" /bin/echo launcher-ok
+      # Same as a release: build the universal launcher into the wheel, install
+      # that wheel on its own and set up the helper from it, without a compiler.
+      - if: runner.os == 'macOS'
+        name: Prebuilt helper from the wheel
+        run: |
+          set -euo pipefail
+          scripts/build-helper.sh
+          uv build --wheel -o "$RUNNER_TEMP/dist"
+          uv venv "$RUNNER_TEMP/venv"
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP"/dist/*.whl
+          out="$(PATH=/usr/bin:/bin "$RUNNER_TEMP/venv/bin/apple-calendar-mcp" install-app --dest "$RUNNER_TEMP/Prebuilt.app")"
+          echo "$out"; grep -q "(prebuilt launcher)" <<<"$out"
+          codesign --verify --verbose "$RUNNER_TEMP/Prebuilt.app"
+          "$RUNNER_TEMP/Prebuilt.app/Contents/MacOS/apple-calendar-mcp-launcher" /bin/echo launcher-ok
 
   docker:
     name: Docker image (remote connector)

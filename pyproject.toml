@@ -48,6 +48,8 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apple_calendar_mcp"]
+# Git-ignored, but shipped in the wheel when the release workflow has built it.
+artifacts = ["src/apple_calendar_mcp/macos_helper/apple-calendar-mcp-launcher"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
