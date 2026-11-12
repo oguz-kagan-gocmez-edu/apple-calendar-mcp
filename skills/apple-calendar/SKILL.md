@@ -10,7 +10,7 @@ The `apple-calendar` MCP server in this plugin reads and writes the calendars sy
 ## Working with events
 
 1. Call `get_time_context` first whenever the request is relative ("tomorrow", "next Friday", "this week"), and resolve dates from its answer, not from your own sense of today.
-2. For "what's my day / week like?", call `agenda`. One call gives what's on now and next, free gaps, overlaps and invitations still waiting for a reply. Use `find_conflicts` when the user asks about double bookings over a longer range.
+2. For "what's my day / week like?", call `agenda`. One call gives what's on now and next, free gaps, overlaps and invitations still waiting for a reply. Use `find_conflicts` when the user asks about double bookings over a longer range, and `calendar_stats` for "how busy was my month?" or "how much time goes to meetings?".
 3. Read before you write. Use `list_events` or `search_events` to find the event and copy its `event_id` exactly. Ids point at one occurrence of a recurring event.
 4. For recurring events, pick `span` deliberately: `this` changes one occurrence, `future` this and later ones, `all` the whole series. Ask the user when it's unclear.
 5. Confirm with the user before deleting an event, and before changing one that has attendees.

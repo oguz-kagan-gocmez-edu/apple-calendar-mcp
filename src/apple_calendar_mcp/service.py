@@ -26,11 +26,14 @@ from .models import (
     BatchChange,
     BatchResult,
     Calendar,
+    CalendarStats,
+    CalendarUsage,
     ChangeInfo,
     ChangeOutcome,
     Conflict,
     ConflictResult,
     CreateChange,
+    DayStats,
     DeleteChange,
     DeleteResult,
     DuplicateGroup,
@@ -48,9 +51,18 @@ from .models import (
     SkippedItem,
     Span,
     TimeContext,
+    TitleUsage,
     UndoResult,
+    WeekdayStats,
 )
-from .scheduling import busy_time, duplicate_key, find_conflicts, find_duplicates, find_free_slots
+from .scheduling import (
+    blocks_time,
+    busy_time,
+    duplicate_key,
+    find_conflicts,
+    find_duplicates,
+    find_free_slots,
+)
 from .store import (
     CalendarError,
     CalendarStore,
@@ -59,7 +71,15 @@ from .store import (
     make_event_id,
     split_event_id,
 )
-from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
+from .timeutil import (
+    ONE_DAY,
+    is_date_only,
+    overlaps,
+    parse_clock,
+    parse_datetime,
+    start_of_day,
+    tz_name,
+)
 
 MAX_RANGE = timedelta(days=366)
 MAX_ALARM_MINUTES = 4 * 7 * 24 * 60  # four weeks
@@ -364,6 +384,102 @@ class CalendarService:
             free_time=free,
             conflicts=[_conflict(p) for p in find_conflicts(timed)],
             invitations=[EventRef.of(ev) for ev in events if ev.my_status == "pending"],
+        )
+
+    def calendar_stats(
+        self,
+        start: str,
+        end: str,
+        calendar_ids: list[str] | None = None,
+        working_hours_start: str = "09:00",
+        working_hours_end: str = "18:00",
+    ) -> CalendarStats:
+        """Where the time goes in a range: busy time per day, weekday, calendar and title."""
+        s, e = self._range(start, end)
+        day_start, day_end = self._working_hours(working_hours_start, working_hours_end)
+        events = [ev for ev in self.store.list_events(s, e, calendar_ids or None) if ev.status != "canceled"]
+        timed = [ev for ev in events if not ev.all_day]
+        taking = [ev for ev in timed if blocks_time(ev, ignore_all_day=True) and ev.end > ev.start]
+
+        def minutes(span: timedelta) -> int:
+            return int(span.total_seconds() // 60)
+
+        def clipped(ev: Event) -> timedelta:
+            return max(min(ev.end, e) - max(ev.start, s), timedelta(0))
+
+        days: list[DayStats] = []
+        in_hours = timedelta(0)
+        d = s.astimezone(self.tz).date()
+        while start_of_day(d, self.tz) < e:
+            ds, de = max(start_of_day(d, self.tz), s), min(start_of_day(d + ONE_DAY, self.tz), e)
+            days.append(
+                DayStats(
+                    date=d,
+                    weekday=d.strftime("%A"),
+                    events=sum(1 for ev in events if overlaps(ev.start, ev.end, ds, de)),
+                    busy_minutes=minutes(busy_time(timed, (ds, de))),
+                )
+            )
+            ws = datetime.combine(d, day_start, tzinfo=self.tz)
+            we = datetime.combine(d if day_end > day_start else d + ONE_DAY, day_end, tzinfo=self.tz)
+            if max(ws, s) < min(we, e):
+                in_hours += busy_time(timed, (max(ws, s), min(we, e)))
+            d += ONE_DAY
+
+        weekdays: list[WeekdayStats] = []
+        for name in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
+            same = [x for x in days if x.weekday == name]
+            if same:
+                total = sum(x.busy_minutes for x in same)
+                weekdays.append(
+                    WeekdayStats(
+                        weekday=name,
+                        days=len(same),
+                        busy_minutes=total,
+                        average_busy_minutes=total // len(same),
+                    )
+                )
+
+        per_cal: dict[str, CalendarUsage] = {}
+        for ev in events:
+            use = per_cal.setdefault(
+                ev.calendar_id,
+                CalendarUsage(
+                    calendar_id=ev.calendar_id, calendar_title=ev.calendar_title, events=0, minutes=0
+                ),
+            )
+            use.events += 1
+        for ev in taking:
+            per_cal[ev.calendar_id].minutes += minutes(clipped(ev))
+
+        per_title: dict[str, TitleUsage] = {}
+        for ev in taking:
+            key = " ".join(ev.title.casefold().split())
+            row = per_title.setdefault(key, TitleUsage(title=ev.title, events=0, minutes=0))
+            row.events += 1
+            row.minutes += minutes(clipped(ev))
+
+        busy = sum(x.busy_minutes for x in days)
+        busiest = max(days, key=lambda x: x.busy_minutes, default=None)
+        return CalendarStats(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            events=len(events),
+            timed_events=len(timed),
+            busy_minutes=busy,
+            busy_minutes_in_working_hours=minutes(in_hours),
+            busy_minutes_outside_working_hours=busy - minutes(in_hours),
+            average_event_minutes=(
+                minutes(sum((ev.end - ev.start for ev in taking), timedelta(0))) // len(taking)
+                if taking
+                else 0
+            ),
+            busiest_day=busiest if busiest and busiest.busy_minutes else None,
+            days=days,
+            by_weekday=weekdays,
+            by_calendar=sorted(per_cal.values(), key=lambda u: (-u.minutes, -u.events, u.calendar_title)),
+            top_titles=sorted(per_title.values(), key=lambda u: (-u.minutes, -u.events, u.title))[:10],
         )
 
     # ------------------------------------------------------------ commands

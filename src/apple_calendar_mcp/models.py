@@ -148,6 +148,55 @@ class ConflictResult(_Model):
     conflicts: list[Conflict]
 
 
+class DayStats(_Model):
+    date: date
+    weekday: str
+    events: int = Field(description="Events on the day (all-day ones included, canceled ones not).")
+    busy_minutes: int = Field(description="Time blocked by timed events, overlaps counted once.")
+
+
+class WeekdayStats(_Model):
+    weekday: str
+    days: int = Field(description="How many of this weekday fall in the range.")
+    busy_minutes: int
+    average_busy_minutes: int
+
+
+class CalendarUsage(_Model):
+    calendar_id: str
+    calendar_title: str
+    events: int
+    minutes: int = Field(description="Sum of the durations of its timed events that take time.")
+
+
+class TitleUsage(_Model):
+    title: str
+    events: int
+    minutes: int
+
+
+class CalendarStats(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    events: int = Field(description="Events in the range (all-day included, canceled left out).")
+    timed_events: int
+    busy_minutes: int = Field(
+        description="Time blocked by timed events, overlaps counted once. Skips events marked 'free' "
+        "and invitations you declined."
+    )
+    busy_minutes_in_working_hours: int
+    busy_minutes_outside_working_hours: int
+    average_event_minutes: int = Field(description="Average length of timed events that take time.")
+    busiest_day: DayStats | None
+    days: list[DayStats]
+    by_weekday: list[WeekdayStats]
+    by_calendar: list[CalendarUsage] = Field(description="Most minutes first.")
+    top_titles: list[TitleUsage] = Field(
+        description="Up to 10 titles that take the most time (case ignored), e.g. recurring meetings."
+    )
+
+
 class DuplicateGroup(_Model):
     title: str
     start: datetime

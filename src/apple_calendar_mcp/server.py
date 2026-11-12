@@ -24,6 +24,7 @@ from .models import (
     BatchChange,
     BatchResult,
     Calendar,
+    CalendarStats,
     ChangeInfo,
     ConflictResult,
     DeleteResult,
@@ -219,6 +220,23 @@ def build_server(
         Skips all-day events, events marked 'free', canceled events and invitations you declined.
         """
         return _guard(lambda: service.find_conflicts(start, end, calendar_ids, limit))
+
+    @mcp.tool(annotations=READ)
+    def calendar_stats(
+        start: Annotated[str, Field(description="Range start, e.g. '2026-11-01'.")],
+        end: Annotated[str, Field(description="Range end. A bare date is inclusive (whole day).")],
+        calendar_ids: CalendarIds = None,
+        working_hours_start: Annotated[str, Field(description="'HH:MM'.")] = "09:00",
+        working_hours_end: Annotated[str, Field(description="'HH:MM'.")] = "18:00",
+    ) -> CalendarStats:
+        """Where the time goes: busy time per day, weekday, calendar and title, in and out of hours.
+
+        Use for "how busy was my month?", "how much time do I spend in meetings?" or "which day is
+        the heaviest?". Busy time skips all-day events, events marked 'free' and declined invitations.
+        """
+        return _guard(
+            lambda: service.calendar_stats(start, end, calendar_ids, working_hours_start, working_hours_end)
+        )
 
     @mcp.tool(annotations=READ)
     def find_duplicates(

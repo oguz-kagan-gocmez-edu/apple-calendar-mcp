@@ -35,6 +35,7 @@ Claude: ▸ agenda
 | `get_event` | Full details, including attendees and repeat rule | read |
 | `agenda` | A day (or up to 14) in one call: what's on now and next, all-day items, busy minutes, free gaps left, overlaps and unanswered invitations | read |
 | `find_conflicts` | Double bookings: pairs of events that overlap and both take the time | read |
+| `calendar_stats` | Where the time goes in a range: busy time per day and weekday, in and out of working hours, per calendar, and the titles that take the most time | read |
 | `find_duplicates` | Events that look like copies of each other (same title, start and end), across calendars; copied repeating series come back as one group | read |
 | `export_ics` | A date range as iCalendar (.ics) text, to share or move to another app; repeating events come out as one event per occurrence | read |
 | `import_ics` | Add the events from .ics text, skipping ones already in the calendar; the whole import is one undoable change, and anything it can't represent exactly is listed with the reason | write |
