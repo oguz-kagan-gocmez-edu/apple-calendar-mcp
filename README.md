@@ -11,6 +11,8 @@ It talks to macOS through Apple's **EventKit** framework. That is the same datab
 
 It can also run as a **remote connector** for claude.ai on the web and on your phone: your own small server that talks to iCloud over CalDAV and signs Claude in with OAuth. See [Remote connector](#remote-connector-claudeai-web-and-mobile).
 
+<!-- mcp-name: io.github.oguz-kagan-gocmez-edu/apple-calendar-mcp -->
+
 ```text
 You:    Find me two free hours this week for the CS350 project, then block them.
 Claude: ▸ get_time_context  ▸ find_free_slots  ▸ create_event
@@ -117,6 +119,18 @@ uv run apple-calendar-mcp doctor        # asks for permission, lists your calend
 ```
 
 `doctor` triggers a macOS prompt for **"Apple Calendar MCP"**. Choose **Allow Full Access**. You only do this once: Claude Desktop, Claude Code and Terminal all reuse that permission. `install-app` needs the Xcode Command Line Tools (`xcode-select --install`).
+
+### Without cloning (PyPI)
+
+The server is also on PyPI as [`apple-calendar-eventkit-mcp`](https://pypi.org/project/apple-calendar-eventkit-mcp/), so `uvx` can run it without a clone:
+
+```bash
+uvx apple-calendar-eventkit-mcp install-app
+uvx apple-calendar-eventkit-mcp doctor
+claude mcp add apple-calendar -s user -- uvx apple-calendar-eventkit-mcp
+```
+
+In Claude Desktop, use `"command": "/opt/homebrew/bin/uvx"` and `"args": ["apple-calendar-eventkit-mcp"]` (run `which uvx` for your path). The PyPI name differs from the repository's because `apple-calendar-mcp` was already taken there; the command inside stays `apple-calendar-mcp`.
 
 ### Claude Desktop
 
