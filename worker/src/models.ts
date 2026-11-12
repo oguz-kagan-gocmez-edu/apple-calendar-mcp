@@ -155,6 +155,24 @@ export interface ConflictResult {
   conflicts: Conflict[];
 }
 
+export interface DuplicateGroup {
+  title: string;
+  start: number;
+  end: number;
+  all_day: boolean;
+  /** 1 for one-off copies; more when repeating series share that many occurrences. */
+  repeats: number;
+  events: EventRef[];
+}
+
+export interface DuplicateResult {
+  range_start: number;
+  range_end: number;
+  count: number;
+  truncated: boolean;
+  groups: DuplicateGroup[];
+}
+
 export interface Agenda {
   range_start: number;
   range_end: number;

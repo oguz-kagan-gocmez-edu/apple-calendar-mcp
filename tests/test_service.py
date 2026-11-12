@@ -302,3 +302,33 @@ class TestFreeSlotsBufferAndDeclined:
     def test_buffer_out_of_range(self, service: CalendarService) -> None:
         with pytest.raises(InvalidRequestError):
             service.find_free_slots("2026-11-03", "2026-11-03", 60, buffer_minutes=241)
+
+
+class TestDuplicates:
+    def test_groups_and_limit(self, service: CalendarService) -> None:
+        service.create_event("Dentist", "2026-11-04T15:00")
+        service.create_event("Dentist", "2026-11-04T15:00", calendar_id="work")
+        service.create_event("Trip", "2026-11-06", all_day=True)
+        service.create_event("trip", "2026-11-06", all_day=True)
+        service.create_event("Trip", "2026-11-07", all_day=True)
+        r = service.find_duplicates("2026-11-01", "2026-11-30")
+        assert (r.count, r.truncated) == (2, False)
+        assert [(g.title.lower(), g.all_day, g.repeats, len(g.events)) for g in r.groups] == [
+            ("dentist", False, 1, 2),
+            ("trip", True, 1, 2),
+        ]
+        assert [e.calendar_title for e in r.groups[0].events] == ["Home", "Work"]
+        only_work = service.find_duplicates("2026-11-01", "2026-11-30", calendar_ids=["work"])
+        assert only_work.count == 0
+        r = service.find_duplicates("2026-11-01", "2026-11-30", limit=1)
+        assert (r.count, r.truncated, len(r.groups)) == (1, True, 1)
+
+    def test_copied_series(self, service: CalendarService) -> None:
+        rule = Recurrence(frequency="weekly", count=3)
+        a = service.create_event("Lecture", "2026-11-03T10:00", recurrence=rule)
+        b = service.create_event("Lecture", "2026-11-03T10:00", recurrence=rule)
+        (group,) = service.find_duplicates("2026-11-01", "2026-11-30").groups
+        assert group.repeats == 3 and sorted(e.id for e in group.events) == sorted([a.id, b.id])
+        # Deleting one copy clears it.
+        service.delete_event(b.id, Span.ALL)
+        assert service.find_duplicates("2026-11-01", "2026-11-30").count == 0

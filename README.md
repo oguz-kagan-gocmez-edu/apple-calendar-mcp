@@ -35,6 +35,7 @@ Claude: ▸ agenda
 | `get_event` | Full details, including attendees and repeat rule | read |
 | `agenda` | A day (or up to 14) in one call: what's on now and next, all-day items, busy minutes, free gaps left, overlaps and unanswered invitations | read |
 | `find_conflicts` | Double bookings: pairs of events that overlap and both take the time | read |
+| `find_duplicates` | Events that look like copies of each other (same title, start and end), across calendars; copied repeating series come back as one group | read |
 | `find_free_slots` | Gaps of at least *N* minutes within working hours, with an optional buffer around other events, skipping weekends if you want | read |
 | `create_event` | Timed or all-day events, with alarms, URL and repeat rules | write |
 | `update_event` | Partial edits. Recurring events take `span`: `this`, `future` or `all` | write |

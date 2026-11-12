@@ -11,6 +11,7 @@ import type {
   Conflict,
   ConflictResult,
   DeleteResult,
+  DuplicateResult,
   Event,
   EventDraft,
   EventList,
@@ -31,7 +32,7 @@ import {
   stepEvent,
 } from "./changes";
 import { eventRef, patchIsEmpty } from "./models";
-import { type ConflictPair, busyTime, findConflicts, findFreeSlots } from "./scheduling";
+import { type ConflictPair, busyTime, findConflicts, findDuplicates, findFreeSlots } from "./scheduling";
 import { type CalendarStore, CalendarError, InvalidRequestError } from "./store";
 import {
   type CivilDate,
@@ -343,6 +344,33 @@ export class CalendarService {
       count: Math.min(pairs.length, lim),
       truncated: pairs.length > lim,
       conflicts: pairs.slice(0, lim),
+    };
+  }
+
+  async findDuplicates(
+    start: string,
+    end: string,
+    calendarIds?: string[] | null,
+    limit = 100,
+  ): Promise<DuplicateResult> {
+    const [s, e] = this.range(start, end);
+    const lim = CalendarService.limit(limit);
+    const groups = findDuplicates(await this.store.listEvents(s, e, calendarIds?.length ? calendarIds : null)).map(
+      ([copies, repeats]) => ({
+        title: copies[0]!.title,
+        start: copies[0]!.start,
+        end: copies[0]!.end,
+        all_day: copies[0]!.all_day,
+        repeats,
+        events: copies.map(eventRef),
+      }),
+    );
+    return {
+      range_start: s,
+      range_end: e,
+      count: Math.min(groups.length, lim),
+      truncated: groups.length > lim,
+      groups: groups.slice(0, lim),
     };
   }
 
