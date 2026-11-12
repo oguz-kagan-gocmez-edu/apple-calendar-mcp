@@ -241,6 +241,28 @@ class BatchResult(_Model):
     results: list[ChangeOutcome]
 
 
+class IcsExport(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    count: int
+    truncated: bool = Field(description="True if the range held more events than were exported.")
+    ics: str = Field(description="iCalendar text; save it as a .ics file.")
+
+
+class SkippedItem(_Model):
+    title: str
+    reason: str
+
+
+class ImportResult(_Model):
+    change_id: str | None = Field(
+        description="Pass to undo_change to remove everything this import added. None if nothing was added."
+    )
+    imported: list[EventRef]
+    skipped: list[SkippedItem] = Field(description="Events left out, each with the reason.")
+
+
 class TimeContext(_Model):
     now: datetime
     timezone: str

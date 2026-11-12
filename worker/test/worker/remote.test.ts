@@ -264,12 +264,14 @@ describe("mcp", () => {
       agenda: true,
       find_conflicts: true,
       find_duplicates: true,
+      export_ics: true,
       create_event: false,
       update_event: false,
       delete_event: false,
       apply_changes: false,
       undo_change: false,
       respond_to_invitation: false,
+      import_ics: false,
       list_changes: true,
     });
 

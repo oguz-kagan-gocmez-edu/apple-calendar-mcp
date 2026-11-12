@@ -43,6 +43,11 @@ export function findConflicts(events: Iterable<Event>): ConflictPair[] {
   return found;
 }
 
+/** What two events must share to count as copies (title: case and spacing ignored). */
+export function duplicateKey(title: string, start: number, end: number, allDay: boolean): string {
+  return JSON.stringify([title.toLowerCase().split(/\s+/).filter(Boolean).join(" "), start, end, allDay]);
+}
+
 /**
  * Events that look like copies of each other: ``[copies, repeats]`` per group.
  *
@@ -59,8 +64,7 @@ export function findDuplicates(events: Iterable<Event>): [Event[], number][] {
   const buckets = new Map<string, Map<string, Event>>();
   for (const e of sorted) {
     if (e.status === "canceled") continue;
-    const title = e.title.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
-    const key = JSON.stringify([title, e.start, e.end, e.all_day]);
+    const key = duplicateKey(e.title, e.start, e.end, e.all_day);
     let bySeries = buckets.get(key);
     if (!bySeries) buckets.set(key, (bySeries = new Map()));
     const series = splitEventId(e.id)[0];
