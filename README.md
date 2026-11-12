@@ -75,6 +75,37 @@ flowchart LR
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Claude Desktop or Claude Code
 
+## Claude plugin
+
+The quickest way to use it in **Claude Code** (and in **Cowork** sessions that run on your Mac) is the plugin. It adds the server and a short skill that teaches Claude the workflow and the one-time permission setup. Install it in Claude Code:
+
+```text
+/plugin install apple-calendar-mcp --marketplace oguz-kagan-gocmez-edu/apple-calendar-mcp
+```
+
+On Claude Code older than 2.1.275, add the marketplace first:
+
+```text
+/plugin marketplace add oguz-kagan-gocmez-edu/apple-calendar-mcp
+/plugin install apple-calendar-mcp@apple-calendar-mcp
+```
+
+You need [uv](https://docs.astral.sh/uv/) on your `PATH`. The first start takes a little longer while uv installs the dependencies.
+
+Then do the permission setup once (it needs the Xcode Command Line Tools, `xcode-select --install`). Ask Claude to *"set up calendar access"* and it runs `install-app` and `doctor` for you, or run them yourself from a clone as in [Setup](#setup). If you set up the helper app before, the plugin reuses it. See [macOS permissions](#macos-permissions-read-this-if-nothing-works) for what the helper app is.
+
+Plain chats on claude.ai, the desktop app and phones don't run local servers. For those, use the [remote connector](#remote-connector-claudeai-web-and-mobile).
+
+### What the plugin runs and sends
+
+- **What it starts.** Claude Code runs `uv run --frozen --no-dev --project <plugin folder> apple-calendar-mcp`. On the first start uv installs the locked dependencies from PyPI (`mcp`, `pydantic`, `pyobjc-framework-EventKit` and what they need) into the plugin's data folder under `~/.claude/plugins/data/`, and downloads Python 3.11+ if none is installed.
+- **What it reads and writes.** The server only talks to macOS EventKit, the calendar database on your Mac. It makes no network requests of its own, keeps no copy of your events and writes no logs to disk. Events leave your Mac only as tool results inside your Claude conversation.
+- **Changes to your calendar.** Only through `create_event`, `update_event` and `delete_event`. They are marked as write and destructive tools, so Claude asks before running them. Start the server with `--read-only` to remove them.
+- **The helper app.** `install-app` runs only when you (or Claude, with your go-ahead) run it. It compiles a ~70-line C launcher with `clang` and writes the ad-hoc-signed `~/Applications/Apple Calendar MCP.app`. Delete that app to remove it.
+- **No accounts or credentials.** The plugin asks for no passwords or tokens. Your calendar accounts stay configured in macOS.
+
+This is an unofficial project and isn't affiliated with Apple.
+
 ## Setup
 
 ```bash
