@@ -161,8 +161,12 @@ def _doctor(args: argparse.Namespace) -> int:
     from .eventkit_store import EventKitStore
 
     app = macos_app.default_app_path()
+    blocked = macos_app.protected_folder()
     if os.environ.get(macos_app.VIA_APP_ENV):
         print(f"helper app         : running via {app}")
+    elif os.access(macos_app.launcher_path(app), os.X_OK) and blocked is not None:
+        print("helper app         : installed, but not used")
+        print(f"WARNING: {macos_app.blocked_message(blocked)}")
     elif os.access(macos_app.launcher_path(app), os.X_OK):
         print("helper app         : installed, but not used (APPLE_CALENDAR_MCP_NO_APP is set)")
     else:
@@ -189,7 +193,7 @@ def _doctor(args: argparse.Namespace) -> int:
             print(f"  [{flag}] {rl.title}  ({rl.source})  id={rl.id}{'  (default)' if rl.is_default else ''}")
     else:
         print("reminders          : off (--no-reminders)")
-    if not os.environ.get(macos_app.VIA_APP_ENV):
+    if not os.environ.get(macos_app.VIA_APP_ENV) and blocked is None:
         print(
             "\nNote: macOS grants calendar access per *host app*. This check used the app\n"
             "you ran it from (e.g. Terminal). Run `apple-calendar-mcp install-app` so the\n"
@@ -272,6 +276,9 @@ def main(argv: list[str] | None = None) -> int:
     # installed, so the calendar permission belongs to it.
     if argv is None and args.backend == "eventkit":
         cmd = macos_app.relaunch_command(real_argv)
+        reason = macos_app.unusable_reason()
+        if cmd is None and reason is not None and args.command != "doctor":  # doctor says it itself
+            log.warning("%s", reason)
         if cmd is not None:
             log.debug("relaunching via %s", cmd[0])
             macos_app.relaunch(cmd)

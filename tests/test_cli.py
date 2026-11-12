@@ -57,6 +57,8 @@ def isolated_app_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point the helper app at an empty temp dir, whatever is installed on this machine."""
     app = tmp_path / "Helper.app"
     monkeypatch.setattr(macos_app, "default_app_path", lambda: app)
+    # Wherever this checkout lives, behave as if it were outside the protected folders.
+    monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: None)
     monkeypatch.delenv(macos_app.VIA_APP_ENV, raising=False)
     return app
 
@@ -364,3 +366,23 @@ def test_doctor_reports_reminder_errors(
     fake_eventkit.reminders_fail = True
     assert cli.main(["doctor", "--timezone", "UTC"]) == 1
     assert "reminders          : ERROR: Reminders access was not granted" in capsys.readouterr().out
+
+
+def test_doctor_explains_a_protected_folder(
+    fake_eventkit: type[FakeEventKitStore],
+    isolated_app_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exe = macos_app.launcher_path(isolated_app_path)
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(
+        macos_app, "protected_folder", lambda paths=None, home=None: Path("/Users/me/Desktop")
+    )
+    assert cli.main(["doctor", "--timezone", "UTC"]) == 0
+    out = capsys.readouterr().out
+    assert "helper app         : installed, but not used" in out
+    assert "WARNING: The helper app can't be used: this server runs from /Users/me/Desktop" in out
+    assert "Note:" not in out

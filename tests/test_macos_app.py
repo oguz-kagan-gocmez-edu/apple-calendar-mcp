@@ -138,7 +138,9 @@ def test_build_real_app_and_run_launcher(tmp_path: Path) -> None:
 class TestRelaunchCommand:
     def test_relaunches_through_installed_app(self, tmp_path: Path) -> None:
         exe = make_launcher(tmp_path / "A.app")
-        cmd = macos_app.relaunch_command(["doctor"], env={}, platform="darwin", app=tmp_path / "A.app")
+        cmd = macos_app.relaunch_command(
+            ["doctor"], env={}, platform="darwin", app=tmp_path / "A.app", paths=[tmp_path / "venv"]
+        )
         assert cmd == [str(exe), sys.executable, "-m", "apple_calendar_mcp", "doctor"]
 
     def test_not_installed(self, tmp_path: Path) -> None:
@@ -153,3 +155,51 @@ class TestRelaunchCommand:
         make_launcher(tmp_path / "A.app")
         cmd = macos_app.relaunch_command([], env={var: "1"}, platform="darwin", app=tmp_path / "A.app")
         assert cmd is None
+
+
+class TestProtectedFolders:
+    @pytest.mark.parametrize(
+        ("where", "blocked"),
+        [
+            ("Desktop/Repos & Projects/app/.venv", "Desktop"),
+            ("Documents/code/.venv", "Documents"),
+            ("Downloads/x", "Downloads"),
+            ("Library/Mobile Documents/com~apple~CloudDocs/app", "Library/Mobile Documents"),
+            ("Desktop", "Desktop"),
+            (".cache/uv/archive-v0/abc", None),
+            ("src/app/.venv", None),
+            ("DesktopStuff/app", None),  # only the folder itself, not a name prefix
+        ],
+    )
+    def test_detection(self, tmp_path: Path, where: str, blocked: str | None) -> None:
+        (tmp_path / where).mkdir(parents=True)
+        found = macos_app.protected_folder([tmp_path / where], home=tmp_path)
+        assert found == (tmp_path.resolve() / blocked if blocked else None)
+
+    def test_any_path_counts(self, tmp_path: Path) -> None:
+        (tmp_path / "Documents").mkdir()
+        paths = [tmp_path / "elsewhere", tmp_path / "Documents"]
+        assert macos_app.protected_folder(paths, home=tmp_path) == tmp_path.resolve() / "Documents"
+
+    def test_relaunch_is_skipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        make_launcher(tmp_path / "A.app")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        (tmp_path / "Desktop" / "app").mkdir(parents=True)
+        cmd = macos_app.relaunch_command(
+            [], env={}, platform="darwin", app=tmp_path / "A.app", paths=[tmp_path / "Desktop" / "app"]
+        )
+        assert cmd is None
+
+    def test_message_names_the_way_out(self, tmp_path: Path) -> None:
+        msg = macos_app.blocked_message(tmp_path / "Desktop")
+        assert "Desktop" in msg and "uvx apple-calendar-eventkit-mcp" in msg
+
+
+def test_unusable_reason_needs_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(macos_app, "default_app_path", lambda: tmp_path / "A.app")
+    monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: tmp_path / "Desktop")
+    assert macos_app.unusable_reason() is None  # helper not installed: nothing to explain
+    make_launcher(tmp_path / "A.app")
+    assert "can't be used" in (macos_app.unusable_reason() or "")
+    monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: None)
+    assert macos_app.unusable_reason() is None

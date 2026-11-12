@@ -119,6 +119,12 @@ _PARTICIPANT: dict[int, AttendeeStatus] = {
 }
 
 
+def _helper_unusable() -> str | None:
+    from . import macos_app
+
+    return macos_app.unusable_reason()
+
+
 def _eventkit_call(fn: Callable[P, R]) -> Callable[P, R]:
     """Decorator: lock + autorelease pool + access check for public methods."""
 
@@ -208,9 +214,12 @@ class EventKitStore:
                 # Refused without ever asking: the app that started us can't
                 # show the calendar prompt (it lacks the usage description).
                 raise PermissionDeniedError(
-                    f"macOS refused calendar access without showing a prompt{detail}. The app that "
-                    "started this server cannot ask for calendar access. Run "
-                    "`apple-calendar-mcp install-app`, then `apple-calendar-mcp doctor`."
+                    f"macOS refused calendar access without showing a prompt{detail}. "
+                    + (
+                        _helper_unusable()
+                        or "The app that started this server cannot ask for calendar access. Run "
+                        "`apple-calendar-mcp install-app`, then `apple-calendar-mcp doctor`."
+                    )
                 )
             raise PermissionDeniedError(f"Calendar access was not granted{detail}.")
         # A store created before the grant may hold an empty snapshot.
@@ -554,9 +563,12 @@ class EventKitStore:
             detail = f" ({err.localizedDescription()})" if err is not None else ""
             if self.authorization_status("reminders") == "not_determined":
                 raise PermissionDeniedError(
-                    f"macOS refused Reminders access without showing a prompt{detail}. Reinstall the "
-                    "helper app so it can ask (`apple-calendar-mcp install-app`), then run "
-                    "`apple-calendar-mcp doctor`."
+                    f"macOS refused Reminders access without showing a prompt{detail}. "
+                    + (
+                        _helper_unusable()
+                        or "Reinstall the helper app so it can ask (`apple-calendar-mcp install-app`), "
+                        "then run `apple-calendar-mcp doctor`."
+                    )
                 )
             raise PermissionDeniedError(f"Reminders access was not granted{detail}.")
         self._store.reset()

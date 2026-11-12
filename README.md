@@ -219,6 +219,7 @@ macOS protects calendars with TCC (Transparency, Consent and Control). It asks o
 - Choose **Allow Full Access**. "Add Events Only" is not enough to read your events.
 - Reminders have their own permission. macOS asks for it the first time a reminder tool runs (or when `doctor` checks reminders). A helper app installed before reminder support doesn't declare it: run `install-app` again, then `doctor`.
 - To change your answer later: **System Settings → Privacy & Security → Calendars** (or **Reminders**) **→ Apple Calendar MCP**.
+- The helper app can't read files under Desktop, Documents, Downloads or iCloud Drive, so it isn't used when the server runs from a checkout there; `doctor` says so. Move the checkout (for example to `~/src`) or install from PyPI.
 - `doctor` shows whether the helper app is in use. Set `APPLE_CALENDAR_MCP_NO_APP=1` to bypass it.
 - Rebuilding the app (for example after an upgrade) may ask for permission once more.
 - Without a GUI session (SSH, launchd), the prompt can never appear. The server times out after 30 s with a clear error instead of hanging.

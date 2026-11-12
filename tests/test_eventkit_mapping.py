@@ -8,6 +8,7 @@ from types import ModuleType
 
 import pytest
 
+from apple_calendar_mcp import macos_app
 from apple_calendar_mcp.models import EventDraft, EventPatch, Recurrence, ReminderDraft, ReminderPatch, Span
 from apple_calendar_mcp.store import NotFoundError, PermissionDeniedError, ReadOnlyCalendarError
 
@@ -18,6 +19,8 @@ from .conftest import IST
 @pytest.fixture
 def ek_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
     fk.install(monkeypatch)
+    # Whatever is installed on this machine, and wherever this checkout is.
+    monkeypatch.setattr(macos_app, "unusable_reason", lambda: None)
     fk.EKEventStore.status, fk.EKEventStore.grant_on_request, fk.EKEventStore.requests = 0, True, 0
     fk.EKEventStore.prompt_shown = True
     fk.EKEventStore.reminder_status, fk.EKEventStore.reminder_grant = 0, True
@@ -228,3 +231,14 @@ class TestReminders:
         ev = store.create_event(EventDraft(title="X", start=at(3, 9), end=at(3, 10)))
         with pytest.raises(NotFoundError, match="No reminder"):
             store.get_reminder(ev.id.split("|")[0])
+
+
+def test_refusal_from_a_protected_folder_says_to_move(
+    store,
+    monkeypatch: pytest.MonkeyPatch,  # type: ignore[no-untyped-def]
+) -> None:
+    monkeypatch.setattr(macos_app, "unusable_reason", lambda: "The helper app can't be used: Desktop.")
+    fk.EKEventStore.grant_on_request, fk.EKEventStore.prompt_shown = False, False
+    with pytest.raises(PermissionDeniedError) as err:
+        store.list_calendars()
+    assert "can't be used: Desktop" in str(err.value) and "install-app" not in str(err.value)
