@@ -7,7 +7,7 @@
  * "read"; with an ``only`` list every calendar not on it is hidden.
  */
 
-import type { Calendar, Event, EventDraft, EventPatch, Span } from "./models";
+import type { Calendar, Event, EventDraft, EventPatch, Reply, Span } from "./models";
 import { type CalendarStore, NotFoundError, ReadOnlyCalendarError } from "./store";
 
 export type Level = "write" | "read" | "hidden";
@@ -132,5 +132,12 @@ export class AccessControlledStore implements CalendarStore {
     const current = AccessControlledStore.visible(await this.inner.getEvent(eventId), levels, eventId);
     AccessControlledStore.checkWritable(current.calendar_id, levels, current.calendar_title);
     return this.inner.deleteEvent(eventId, span);
+  }
+
+  async respondToInvitation(eventId: string, reply: Reply, span: Span): Promise<Event> {
+    const [levels] = await this.levels();
+    const current = AccessControlledStore.visible(await this.inner.getEvent(eventId), levels, eventId);
+    AccessControlledStore.checkWritable(current.calendar_id, levels, current.calendar_title);
+    return this.inner.respondToInvitation(eventId, reply, span);
   }
 }

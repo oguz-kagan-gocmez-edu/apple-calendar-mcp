@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from .models import Calendar, Event, EventDraft, EventPatch, Span
+from .models import Calendar, Event, EventDraft, EventPatch, Reply, Span
 from .store import CalendarStore, NotFoundError, ReadOnlyCalendarError
 
 Level = Literal["write", "read", "hidden"]
@@ -162,3 +162,13 @@ class AccessControlledStore:
         current = self._visible(self.inner.get_event(event_id), levels, event_id)
         self._check_writable(current.calendar_id, levels, current.calendar_title)
         return self.inner.delete_event(event_id, span)
+
+    @property
+    def supports_replies(self) -> bool:
+        return self.inner.supports_replies
+
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span) -> Event:
+        levels, _ = self._levels()
+        current = self._visible(self.inner.get_event(event_id), levels, event_id)
+        self._check_writable(current.calendar_id, levels, current.calendar_title)
+        return self.inner.respond_to_invitation(event_id, reply, span)

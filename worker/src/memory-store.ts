@@ -3,8 +3,15 @@
  * recurrence is the CalDAV store's job.
  */
 
-import type { AttendeeStatus, Calendar, Event, EventDraft, EventPatch, Span } from "./models";
-import { type CalendarStore, InvalidRequestError, NotFoundError, makeEventId, splitEventId } from "./store";
+import type { AttendeeStatus, Calendar, Event, EventDraft, EventPatch, Reply, Span } from "./models";
+import {
+  type CalendarStore,
+  InvalidRequestError,
+  NOT_INVITED,
+  NotFoundError,
+  makeEventId,
+  splitEventId,
+} from "./store";
 import { overlaps } from "./time";
 
 const CALENDARS: Calendar[] = [
@@ -96,6 +103,13 @@ export class MemoryStore implements CalendarStore {
   /** Mark an event as an invitation with your reply (tests and the demo only). */
   setMyStatus(eventId: string, status: AttendeeStatus | null): void {
     this.find(eventId).my_status = status;
+  }
+
+  respondToInvitation(eventId: string, reply: Reply, _span: Span): Promise<Event> {
+    const e = this.find(eventId);
+    if (e.my_status === null) throw new InvalidRequestError(NOT_INVITED);
+    e.my_status = reply;
+    return Promise.resolve({ ...e });
   }
 
   deleteEvent(eventId: string, _span: Span): Promise<Event> {

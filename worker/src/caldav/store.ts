@@ -20,6 +20,7 @@ import type {
   EventPatch,
   EventStatus,
   Recurrence,
+  Reply,
   Span,
   Weekday,
 } from "../models";
@@ -28,6 +29,7 @@ import { byStartThenTitle } from "../service";
 import {
   type CalendarStore,
   InvalidRequestError,
+  NOT_INVITED,
   NotFoundError,
   ReadOnlyCalendarError,
   makeEventId,
@@ -379,6 +381,31 @@ export class CaldavStore implements CalendarStore {
   }
 
   // ------------------------------------------------------------ series edits
+  /** The detached component for one occurrence, created from the master if needed. */
+  private ensureOverride(res: Resource, exp: Expander, ts: number, current: Event): Component {
+    let override = exp.overrideAt(ts);
+    if (!override) {
+      override = clone(exp.master);
+      for (const name of [...SERIES_ONLY, "dtstart", "dtend", "duration"]) override.removeAllProperties(name);
+      addTime(override, "recurrence-id", this.like(exp, ts));
+      this.setTimes(override, current.start, current.end, current.all_day);
+      res.cal.addSubcomponent(override);
+    }
+    return override;
+  }
+
+  /** Set your PARTSTAT on ``comp``. False if you aren't among its attendees. */
+  private setReply(comp: Component, reply: Reply): boolean {
+    let hit = false;
+    for (const a of comp.getAllProperties("attendee")) {
+      if (mailto(a.getFirstValue())?.trim().toLowerCase() !== this.me) continue;
+      a.setParameter("partstat", reply.toUpperCase());
+      a.removeParameter("rsvp");
+      hit = true;
+    }
+    return hit;
+  }
+
   private shiftSeries(res: Resource, delta: number): void {
     let exp = new Expander(res, this.zone);
     const exdates = [...exp.exdates()];
@@ -548,18 +575,29 @@ export class CaldavStore implements CalendarStore {
     if (patch.calendar_id != null && patch.calendar_id !== res.calendarId) {
       throw new InvalidRequestError("A single occurrence can't move to another calendar; use span 'all'.");
     }
-    let override = exp.overrideAt(ts);
-    if (!override) {
-      override = clone(exp.master);
-      for (const name of [...SERIES_ONLY, "dtstart", "dtend", "duration"]) override.removeAllProperties(name);
-      addTime(override, "recurrence-id", this.like(exp, ts));
-      this.setTimes(override, current.start, current.end, current.all_day);
-      res.cal.addSubcomponent(override);
-    }
+    const override = this.ensureOverride(res, exp, ts, current);
     const newStart = patch.start ?? current.start;
     const newEnd = patch.end ?? newStart + (current.end - current.start);
     this.setTimes(override, newStart, newEnd, patch.all_day ?? current.all_day);
     this.applyFields(override, patch);
+    await this.put(res);
+    return this.materialize(res, ts);
+  }
+
+  async respondToInvitation(eventId: string, reply: Reply, span: Span): Promise<Event> {
+    const { res, exp, ts, occ } = await this.locate(eventId);
+    const cal = (await this.calendar(res.calendarId, true)).cal;
+    if (!this.me) {
+      throw new InvalidRequestError(
+        "The CalDAV username isn't an email address, so the server can't tell which attendee is you.",
+      );
+    }
+    const targets =
+      exp.master.hasProperty("rrule") && span === "this"
+        ? [this.ensureOverride(res, exp, ts, this.event(res, exp, occ, cal))]
+        : res.events;
+    const hits = targets.map((c) => this.setReply(c, reply));
+    if (!hits.includes(true)) throw new InvalidRequestError(NOT_INVITED);
     await this.put(res);
     return this.materialize(res, ts);
   }
@@ -589,4 +627,3 @@ export function resetCaches(): void {
   discovery.clear();
   uidCalendar.clear();
 }
-

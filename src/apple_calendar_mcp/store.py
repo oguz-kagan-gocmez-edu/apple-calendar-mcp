@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .models import Calendar, Event, EventDraft, EventPatch, Span
+from .models import Calendar, Event, EventDraft, EventPatch, Reply, Span
 
 
 class CalendarError(Exception):
@@ -60,6 +60,18 @@ class CalendarStore(Protocol):
     def delete_event(self, event_id: str, span: Span) -> Event:
         """Delete and return the event as it was before deletion."""
         ...
+
+    @property
+    def supports_replies(self) -> bool:
+        """Whether this backend can answer invitations."""
+        ...
+
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span) -> Event:
+        """Set your own reply on an invitation; ``span`` is THIS or ALL."""
+        ...
+
+
+NOT_INVITED = "This event isn't an invitation you can answer: you aren't on its attendee list."
 
 
 def make_event_id(series_id: str, occurrence_ts: float) -> str:

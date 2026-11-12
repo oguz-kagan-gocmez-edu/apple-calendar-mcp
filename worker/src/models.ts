@@ -24,6 +24,10 @@ export type AttendeeStatus =
   | "completed"
   | "in_process";
 
+export const REPLIES = ["accepted", "declined", "tentative"] as const;
+/** An answer to an invitation. */
+export type Reply = (typeof REPLIES)[number];
+
 export const SPANS = ["this", "future", "all"] as const;
 /** Which occurrences of a recurring event a change applies to. */
 export type Span = (typeof SPANS)[number];

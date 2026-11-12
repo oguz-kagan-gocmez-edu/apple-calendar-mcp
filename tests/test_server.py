@@ -20,7 +20,15 @@ READ_TOOLS = {
     "agenda",
     "find_conflicts",
 }
-WRITE_TOOLS = {"create_event", "update_event", "delete_event", "apply_changes", "undo_change", "list_changes"}
+WRITE_TOOLS = {
+    "create_event",
+    "update_event",
+    "delete_event",
+    "apply_changes",
+    "undo_change",
+    "list_changes",
+    "respond_to_invitation",
+}
 
 
 async def call(client: Client, name: str, args: dict[str, Any] | None = None) -> Any:
