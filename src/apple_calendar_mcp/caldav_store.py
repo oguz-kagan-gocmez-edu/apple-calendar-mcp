@@ -42,9 +42,11 @@ from .models import (
     EventPatch,
     EventStatus,
     Recurrence,
+    Reply,
     Span,
 )
 from .store import (
+    NOT_INVITED,
     BackendError,
     CalendarError,
     InvalidRequestError,
@@ -69,6 +71,7 @@ _PARTSTAT: dict[str, AttendeeStatus] = {
     "COMPLETED": "completed",
     "IN-PROCESS": "in_process",
 }
+_REPLY: dict[Reply, str] = {"accepted": "ACCEPTED", "declined": "DECLINED", "tentative": "TENTATIVE"}
 _STATUS: dict[str, EventStatus] = {
     "CONFIRMED": "confirmed",
     "TENTATIVE": "tentative",
@@ -144,6 +147,8 @@ class _Resource:
 
 class CaldavStore:
     """``CalendarStore`` backed by a CalDAV account (iCloud by default)."""
+
+    supports_replies = True
 
     def __init__(
         self,
@@ -376,6 +381,32 @@ class CaldavStore:
             if self._ts(comp.decoded("RECURRENCE-ID")) == ts:
                 return comp
         return None
+
+    def _ensure_override(self, res: _Resource, ts: int, current: Event) -> VEvent:
+        """The detached component for one occurrence, created from the master if needed."""
+        override = self._override(res, ts)
+        if override is None:
+            master = res.master
+            override = copy.deepcopy(master)
+            for name in (*_SERIES_ONLY, "DTSTART", "DTEND", "DURATION"):
+                override.pop(name, None)
+            override.add("RECURRENCE-ID", self._like(master, datetime.fromtimestamp(ts, self.tz)))
+            self._set_times(override, current.start, current.end, current.all_day)
+            res.ical.add_component(override)
+        return override
+
+    def _set_reply(self, comp: VEvent, reply: Reply) -> bool:
+        """Set your PARTSTAT on ``comp``. False if you aren't among its attendees."""
+        attendees = comp.get("ATTENDEE", [])
+        if not isinstance(attendees, list):
+            attendees = [attendees]
+        hit = False
+        for a in attendees:
+            if (_mailto(a) or "").casefold() == self._me:
+                a.params["PARTSTAT"] = _REPLY[reply]
+                a.params.pop("RSVP", None)
+                hit = True
+        return hit
 
     # ------------------------------------------------------------ server access
     def _calendars(self, refresh: bool = False) -> dict[str, tuple[Any, Calendar]]:
@@ -682,14 +713,7 @@ class CaldavStore:
                 raise InvalidRequestError(
                     "A single occurrence can't move to another calendar; use span 'all'."
                 )
-            override = self._override(res, ts)
-            if override is None:
-                override = copy.deepcopy(master)
-                for name in (*_SERIES_ONLY, "DTSTART", "DTEND", "DURATION"):
-                    override.pop(name, None)
-                override.add("RECURRENCE-ID", self._like(master, original))
-                self._set_times(override, current.start, current.end, current.all_day)
-                res.ical.add_component(override)
+            override = self._ensure_override(res, ts, current)
             new_start = patch.start or current.start
             new_end = patch.end or new_start + (current.end - current.start)
             all_day = current.all_day if patch.all_day is None else patch.all_day
@@ -719,6 +743,27 @@ class CaldavStore:
                 self._truncate(res, datetime.fromtimestamp(ts, self.tz))
                 self._put(res)
             return before
+
+    @_translate_errors
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span) -> Event:
+        with self._lock:
+            res, ts, comp = self._locate(event_id)
+            self._calendar(res.calendar_id, for_write=True)
+            if self._me is None:
+                raise InvalidRequestError(
+                    "The CalDAV username isn't an email address, so the server can't tell "
+                    "which attendee is you."
+                )
+            if "RRULE" in res.master and span is Span.THIS:
+                cal = self._calendars()[res.calendar_id][1]
+                targets = [self._ensure_override(res, ts, self._event(res, comp, cal))]
+            else:
+                targets = res.events
+            # A list, not a generator: every component must be updated.
+            if not any([self._set_reply(c, reply) for c in targets]):
+                raise InvalidRequestError(NOT_INVITED)
+            self._put(res)
+            return self._materialize(res, ts)
 
 
 def _mailto(prop: Any) -> str | None:

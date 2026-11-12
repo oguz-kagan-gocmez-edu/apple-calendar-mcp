@@ -27,7 +27,12 @@ from caldav.lib import error as dav_error
 from apple_calendar_mcp.caldav_store import CaldavStore, _object_href
 from apple_calendar_mcp.models import EventDraft, EventPatch, Recurrence, Span
 from apple_calendar_mcp.service import CalendarService
-from apple_calendar_mcp.store import BackendError, NotFoundError, PermissionDeniedError
+from apple_calendar_mcp.store import (
+    BackendError,
+    InvalidRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 
 from .conftest import IST, NOW
 from .test_changes import TestBatch, TestUndo  # noqa: F401
@@ -266,3 +271,63 @@ def test_my_status_matches_the_account_email(radicale_url: str) -> None:
     assert got == {"a": "pending", "b": "declined"}
     own = store.create_event(EventDraft(title="Mine", start=at(3, 12), end=at(3, 13)))
     assert store.get_event(own.id).my_status is None
+
+
+def _invited(radicale_url: str, body: str) -> tuple[CaldavStore, str]:
+    """A store for a fresh account holding one invitation from boss@example.com."""
+    user = f"u{uuid.uuid4().hex[:10]}@example.com"
+    client = caldav.DAVClient(url=radicale_url, username=user, password="x", auth_type="basic")
+    cal = client.principal().make_calendar(name="Home", cal_id="home")
+    cal.save_event(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\n"
+        "UID:inv\r\nDTSTAMP:20261101T000000Z\r\n"
+        f"DTSTART:20261103T060000Z\r\nDTEND:20261103T070000Z\r\nSUMMARY:Review\r\n{body}"
+        "ORGANIZER:mailto:boss@example.com\r\n"
+        "ATTENDEE;PARTSTAT=ACCEPTED:mailto:boss@example.com\r\n"
+        f"ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{user}\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    return CaldavStore(IST, url=radicale_url, username=user, password="x", client=client), user
+
+
+def _raw(store: CaldavStore) -> str:
+    cal = store._client.principal().calendars()[0]
+    return str(cal.object_by_uid("inv").data)
+
+
+def test_reply_sets_only_my_partstat(radicale_url: str) -> None:
+    store, user = _invited(radicale_url, "")
+    assert store.supports_replies
+    (inv,) = store.list_events(at(3, 0), at(4, 0))
+    got = store.respond_to_invitation(inv.id, "tentative", Span.ALL)
+    assert got.my_status == "tentative"
+    assert {a.email: a.status for a in got.attendees} == {
+        "boss@example.com": "accepted",
+        user: "tentative",
+    }
+    raw = _raw(store)
+    assert f"ATTENDEE;PARTSTAT=TENTATIVE:mailto:{user}" in raw.replace("\r\n ", "")
+    assert "RSVP" not in raw
+    assert store.respond_to_invitation(inv.id, "declined", Span.THIS).my_status == "declined"
+
+
+def test_reply_to_one_occurrence_and_to_the_series(radicale_url: str) -> None:
+    store, _ = _invited(radicale_url, "RRULE:FREQ=WEEKLY;COUNT=3\r\n")
+    ids = [e.id for e in store.list_events(at(1, 0), at(30, 0))]
+    assert len(ids) == 3
+    one = store.respond_to_invitation(ids[1], "declined", Span.THIS)
+    assert one.id == ids[1] and one.start == at(10, 9)
+    assert [store.get_event(i).my_status for i in ids] == ["pending", "declined", "pending"]
+    store.respond_to_invitation(ids[0], "accepted", Span.ALL)
+    assert [store.get_event(i).my_status for i in ids] == ["accepted"] * 3
+    assert len(store.list_events(at(1, 0), at(30, 0))) == 3
+
+
+def test_reply_needs_an_invitation(store: CaldavStore, radicale_url: str) -> None:
+    own = store.create_event(EventDraft(title="Mine", start=at(3, 12), end=at(3, 13)))
+    with pytest.raises(InvalidRequestError, match="email address"):
+        store.respond_to_invitation(own.id, "accepted", Span.ALL)
+    invited, _ = _invited(radicale_url, "")
+    mine = invited.create_event(EventDraft(title="Mine", start=at(3, 12), end=at(3, 13)))
+    with pytest.raises(InvalidRequestError, match="isn't an invitation"):
+        invited.respond_to_invitation(mine.id, "accepted", Span.ALL)

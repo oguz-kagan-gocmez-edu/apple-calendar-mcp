@@ -1,6 +1,6 @@
 /** The storage interface the service talks to, plus user-safe errors. */
 
-import type { Calendar, Event, EventDraft, EventPatch, Span } from "./models";
+import type { Calendar, Event, EventDraft, EventPatch, Reply, Span } from "./models";
 
 /** Base class for errors whose message is safe to show to Claude and the user. */
 export class CalendarError extends Error {
@@ -32,7 +32,11 @@ export interface CalendarStore {
   updateEvent(eventId: string, patch: EventPatch, span: Span): Promise<Event>;
   /** Delete and return the event as it was before. */
   deleteEvent(eventId: string, span: Span): Promise<Event>;
+  /** Set your own reply on an invitation; ``span`` is "this" or "all". */
+  respondToInvitation(eventId: string, reply: Reply, span: Span): Promise<Event>;
 }
+
+export const NOT_INVITED = "This event isn't an invitation you can answer: you aren't on its attendee list.";
 
 /** '<series id>|<original start, unix seconds>' */
 export function makeEventId(seriesId: string, occurrenceMs: number): string {

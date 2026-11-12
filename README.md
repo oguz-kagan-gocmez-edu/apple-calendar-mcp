@@ -42,12 +42,14 @@ Claude: ▸ agenda
 | `apply_changes` | Up to 25 creates, updates and deletes in one go, all-or-nothing: everything is checked first, and a failure part-way rolls back the rest | destructive |
 | `undo_change` | Undo the latest change (or one picked from `list_changes`), including a whole batch | destructive |
 | `list_changes` | Recent changes made through the server, and whether each can be undone | read |
+| `respond_to_invitation` | Accept, decline or tentatively accept an invitation, for the whole series or one occurrence (iCloud/CalDAV backend only) | write |
 
 Other parts of the design:
 
 - **Free/busy that matches reality.** Free time, busy minutes and conflicts ignore all-day events, events marked *free*, canceled events and invitations you declined. Invitations you haven't answered still count as busy, and `agenda` lists them separately.
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
 - **`--read-only` mode.** Runs the server without the write tools at all.
+- **Answer invitations.** On the iCloud (CalDAV) backend and the remote connector, `respond_to_invitation` sets your reply and iCloud tells the organizer. It needs the sign-in name to be the email address the invitation was sent to. EventKit gives apps no way to reply, so on the Mac backend the tool is not offered; answer in the Calendar app there. Replies are not in the undo log, because the organizer has already been told.
 - **Undo that won't clobber anything.** Every write is logged with the event before and after. Undo restores it exactly, or refuses: if the event was edited again since, or if the change can't be reversed exactly (edits to several occurrences of a repeating event, a deleted occurrence, a deleted invitation whose invites can't be resent). The log keeps the last 50 changes, in memory on your Mac.
 - **Per-calendar access.** Mark calendars read-only, or hide them from Claude entirely. See [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch).
 - **Prompt-injection hygiene.** The server tells the model that event text is untrusted data. Anyone who sends you an invite controls that text.
@@ -372,7 +374,7 @@ CI cannot click "Allow" in a permission dialog. Before a release, run through th
 
 ## Limitations and roadmap
 
-- **No invitations.** EventKit cannot add attendees. Attendees are read-only.
+- **No sending invitations.** Attendees can't be added or removed. Answering an invitation you received works on the iCloud (CalDAV) backend only.
 - **Recurrence subset.** Repeat rules support daily, weekly (with weekdays), monthly and yearly frequency, with an interval and a count or until date. More complex rules created in Calendar.app (for example "last Friday of the month") are reported in simplified form.
 - **Reminders** are not supported yet. EventKit exposes them through the same store, so this would be a natural next step.
 - **Remote connector is self-hosted.** Each person runs their own copy (a free Cloudflare Worker or a server). A shared, multi-user service listed in Claude's connector directory would need encrypted per-user credential storage and Anthropic's review.

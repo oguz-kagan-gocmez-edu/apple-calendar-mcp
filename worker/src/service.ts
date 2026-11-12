@@ -17,6 +17,7 @@ import type {
   EventPatch,
   FreeSlot,
   Recurrence,
+  Reply,
   Span,
 } from "./models";
 import {
@@ -529,6 +530,13 @@ export class CalendarService {
     const used: Span = before.is_recurring ? span : "this";
     await this.recordSteps([{ action: "delete", before, after: null, span: used }]);
     return { deleted: true, event_id: eventId, span: used, title: before.title };
+  }
+
+  // ------------------------------------------------------------ invitations
+  /** Answer an invitation. Not recorded for undo: the organizer has already been told. */
+  async respondToInvitation(eventId: string, reply: Reply, span: Span = "all"): Promise<Event> {
+    if (span === "future") throw new InvalidRequestError("Answer 'this' occurrence or 'all' of the series.");
+    return this.store.respondToInvitation(eventId, reply, span);
   }
 
   // ------------------------------------------------------------ change log

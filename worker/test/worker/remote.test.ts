@@ -268,6 +268,7 @@ describe("mcp", () => {
       delete_event: false,
       apply_changes: false,
       undo_change: false,
+      respond_to_invitation: false,
       list_changes: true,
     });
 

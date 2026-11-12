@@ -41,6 +41,7 @@ from .models import (
     EventPatch,
     EventStatus,
     Recurrence,
+    Reply,
     Span,
 )
 from .store import (
@@ -113,6 +114,9 @@ def _eventkit_call(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 class EventKitStore:
+    # EventKit gives apps no way to answer an invitation.
+    supports_replies = False
+
     def __init__(self, tz: tzinfo, access_timeout: float = 30.0) -> None:
         self.tz = tz
         self.access_timeout = access_timeout
@@ -484,6 +488,12 @@ class EventKitStore:
         if not ok:
             raise BackendError(f"Deleting failed: {err.localizedDescription() if err else 'unknown error'}")
         return before
+
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span) -> Event:
+        raise InvalidRequestError(
+            "macOS doesn't let apps answer invitations. Answer it in the Calendar app, "
+            "or use the iCloud (CalDAV) backend."
+        )
 
 
 def _mailto(url: Any) -> str | None:

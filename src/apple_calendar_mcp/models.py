@@ -25,6 +25,7 @@ WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun"
 
 Availability = Literal["busy", "free", "tentative", "unavailable", "not_supported"]
 EventStatus = Literal["none", "confirmed", "tentative", "canceled"]
+Reply = Literal["accepted", "declined", "tentative"]
 AttendeeStatus = Literal[
     "unknown", "pending", "accepted", "declined", "tentative", "delegated", "completed", "in_process"
 ]

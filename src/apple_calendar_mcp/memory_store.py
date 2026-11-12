@@ -17,9 +17,20 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
 
-from .models import AttendeeStatus, Availability, Calendar, Event, EventDraft, EventPatch, Recurrence, Span
+from .models import (
+    AttendeeStatus,
+    Availability,
+    Calendar,
+    Event,
+    EventDraft,
+    EventPatch,
+    Recurrence,
+    Reply,
+    Span,
+)
 from .recurrence import count_before, occurrence_starts
 from .store import (
+    NOT_INVITED,
     InvalidRequestError,
     NotFoundError,
     ReadOnlyCalendarError,
@@ -58,6 +69,8 @@ def _clean(text: str | None, current: str | None) -> str | None:
 
 
 class MemoryStore:
+    supports_replies = True
+
     def __init__(self, tz: tzinfo, calendars: list[Calendar] | None = None) -> None:
         self.tz = tz
         self._lock = threading.RLock()
@@ -123,7 +136,7 @@ class MemoryStore:
             recurrence=s.recurrence,
             alarms_minutes_before=list(ov.get("alarms", s.alarms)),
             availability=ov.get("availability", s.availability),
-            my_status=s.my_status,
+            my_status=ov.get("my_status", s.my_status),
         )
 
     @staticmethod
@@ -244,6 +257,20 @@ class MemoryStore:
         """Mark a series as an invitation with your reply (tests and the demo only)."""
         with self._lock:
             self._locate(event_id)[0].my_status = status
+
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span) -> Event:
+        with self._lock:
+            s, original = self._locate(event_id)
+            self._calendar(s.calendar_id, for_write=True)
+            if s.my_status is None:
+                raise InvalidRequestError(NOT_INVITED)
+            if s.recurrence is not None and span is Span.THIS:
+                s.overrides.setdefault(int(original.timestamp()), {})["my_status"] = reply
+            else:
+                s.my_status = reply
+                for ov in s.overrides.values():
+                    ov.pop("my_status", None)
+            return self._materialize(s, original)
 
     def get_event(self, event_id: str) -> Event:
         with self._lock:

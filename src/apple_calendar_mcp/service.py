@@ -39,6 +39,7 @@ from .models import (
     EventRef,
     FreeSlotResult,
     Recurrence,
+    Reply,
     Span,
     TimeContext,
     UndoResult,
@@ -547,6 +548,18 @@ class CalendarService:
             span=span,
             title=before.title,
         )
+
+    # ------------------------------------------------------------ invitations
+    @property
+    def can_reply(self) -> bool:
+        """Whether the backend can answer invitations (EventKit can't)."""
+        return self.store.supports_replies
+
+    def respond_to_invitation(self, event_id: str, reply: Reply, span: Span = Span.ALL) -> Event:
+        """Answer an invitation. Not recorded for undo: the organizer has already been told."""
+        if span is Span.FUTURE:
+            raise InvalidRequestError("Answer 'this' occurrence or 'all' of the series.")
+        return self.store.respond_to_invitation(event_id, reply, span)
 
     # ------------------------------------------------------------ change log
     def _record(self, steps: list[Step]) -> ChangeRecord:
