@@ -9,7 +9,7 @@ import { IST, at } from "./helpers";
 const ev = (start: number, end: number, extra: Partial<Event> = {}): Event => ({
   id: "x|0", calendar_id: "c", calendar_title: "C", title: "t", start, end, all_day: false, location: null,
   notes: null, url: null, is_recurring: false, recurrence: null, alarms_minutes_before: [], availability: "busy",
-  status: "none", organizer: null, attendees: [], ...extra,
+  status: "none", organizer: null, attendees: [], my_status: null, ...extra,
 });
 
 const slots = (events: Event[], o: Partial<Parameters<typeof findFreeSlots>[1]> = {}): [number, number][] =>

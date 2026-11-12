@@ -1,5 +1,5 @@
 /**
- * MCP surface (port of server.py): the same nine tools, names, descriptions
+ * MCP surface (port of server.py): the same eleven tools, names, descriptions
  * and annotations, so Claude sees no difference between the Python and the
  * Worker connector. All logic lives in ``CalendarService``.
  */
@@ -7,7 +7,16 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import { AVAILABILITY, type Event, type EventList, type FreeSlot, RecurrenceSchema, SPANS } from "./models";
+import {
+  AVAILABILITY,
+  type Conflict,
+  type Event,
+  type EventList,
+  type EventRef,
+  type FreeSlot,
+  RecurrenceSchema,
+  SPANS,
+} from "./models";
 import type { CalendarService } from "./service";
 import { CalendarError } from "./store";
 import type { Zone } from "./time";
@@ -18,6 +27,7 @@ export const INSTRUCTIONS = `\
 Tools for the user's Apple Calendar (the calendars in their iCloud account).
 
 * Call get_time_context first when the request is relative ("tomorrow", "next Friday").
+* For "what's my day like?" use agenda; it already includes free time and overlaps.
 * Times are ISO 8601. Times without an offset are in the user's time zone.
 * Event ids are opaque and identify one occurrence of a recurring event; copy them exactly.
 * Recurring events: span='this' changes one occurrence, 'future' this and later ones,
@@ -68,6 +78,19 @@ function listOut(l: EventList, zone: Zone) {
 
 function slotOut(s: FreeSlot, zone: Zone) {
   return { start: zone.iso(s.start), end: zone.iso(s.end), duration_minutes: s.duration_minutes };
+}
+
+function refOut(r: EventRef, zone: Zone) {
+  return { ...r, start: zone.iso(r.start), end: zone.iso(r.end) };
+}
+
+function conflictOut(c: Conflict, zone: Zone) {
+  return {
+    start: zone.iso(c.start),
+    end: zone.iso(c.end),
+    overlap_minutes: c.overlap_minutes,
+    events: c.events.map((r) => refOut(r, zone)),
+  };
 }
 
 type Result = { content: { type: "text"; text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
@@ -160,7 +183,7 @@ export function buildServer(service: CalendarService, opts: { readOnly?: boolean
     {
       description:
         "Gaps of at least duration_minutes within working hours.\n\n" +
-        "Ignores all-day events, events marked 'free' and canceled events.",
+        "Ignores all-day events, events marked 'free', canceled events and invitations you declined.",
       annotations: READ,
       inputSchema: z.object({
         start: z.string().describe("Search from (past time is skipped)."),
@@ -171,12 +194,90 @@ export function buildServer(service: CalendarService, opts: { readOnly?: boolean
         working_hours_end: z.string().default("18:00").describe("'HH:MM', 24h."),
         include_weekends: z.boolean().default(false),
         max_slots: z.number().int().min(1).max(200).default(20),
+        buffer_minutes: z
+          .number()
+          .int()
+          .min(0)
+          .max(240)
+          .default(0)
+          .describe("Keep this much time clear before and after other events."),
       }),
     },
     (a) =>
       guard(async () => {
         const res = await service.findFreeSlots(a);
         return { timezone: zone.name, slots: res.slots.map((s) => slotOut(s, zone)), truncated: res.truncated };
+      }),
+  );
+
+  mcp.registerTool(
+    "agenda",
+    {
+      description:
+        "A day (or a few) at a glance in one call: what's on now and next, all-day items,\n" +
+        "every timed event, how busy the working hours are, free gaps left, overlapping\n" +
+        'events and invitations not answered yet. Use it for "what does my day look like?".',
+      annotations: READ,
+      inputSchema: z.object({
+        day: z.string().nullish().describe("First day, e.g. '2026-11-03'. Default: today."),
+        days: z.number().int().min(1).max(14).default(1).describe("How many days to cover."),
+        calendar_ids: calendarIds,
+        working_hours_start: z.string().default("09:00").describe("'HH:MM', 24h."),
+        working_hours_end: z.string().default("18:00").describe("'HH:MM', 24h."),
+        min_free_minutes: z
+          .number()
+          .int()
+          .min(5)
+          .max(1440)
+          .default(30)
+          .describe("Shortest gap worth listing as free time."),
+      }),
+    },
+    (a) =>
+      guard(async () => {
+        const g = await service.agenda(a);
+        return {
+          timezone: zone.name,
+          range_start: zone.iso(g.range_start),
+          range_end: zone.iso(g.range_end),
+          now: zone.iso(g.now),
+          happening_now: g.happening_now.map((r) => refOut(r, zone)),
+          up_next: g.up_next ? refOut(g.up_next, zone) : null,
+          all_day: g.all_day.map((r) => refOut(r, zone)),
+          events: g.events.map((r) => refOut(r, zone)),
+          busy_minutes: g.busy_minutes,
+          free_time: g.free_time.map((s) => slotOut(s, zone)),
+          conflicts: g.conflicts.map((c) => conflictOut(c, zone)),
+          invitations: g.invitations.map((r) => refOut(r, zone)),
+        };
+      }),
+  );
+
+  mcp.registerTool(
+    "find_conflicts",
+    {
+      description:
+        "Pairs of timed events that overlap and both take the time (double bookings).\n\n" +
+        "Skips all-day events, events marked 'free', canceled events and invitations you declined.",
+      annotations: READ,
+      inputSchema: z.object({
+        start: z.string().describe("Range start, e.g. '2026-11-02'."),
+        end: z.string().describe("Range end. A bare date is inclusive (whole day)."),
+        calendar_ids: calendarIds,
+        limit: limit(100),
+      }),
+    },
+    (a) =>
+      guard(async () => {
+        const r = await service.findConflicts(a.start, a.end, a.calendar_ids, a.limit);
+        return {
+          timezone: zone.name,
+          range_start: zone.iso(r.range_start),
+          range_end: zone.iso(r.range_end),
+          count: r.count,
+          truncated: r.truncated,
+          conflicts: r.conflicts.map((c) => conflictOut(c, zone)),
+        };
       }),
   );
 

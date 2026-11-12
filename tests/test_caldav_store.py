@@ -226,3 +226,28 @@ def test_foreign_uids_cannot_escape_the_calendar() -> None:
 
     href = _object_href(Cal(), "../../other/evil")
     assert href == "https://dav.example/123/calendars/work/..%2F..%2Fother%2Fevil.ics"
+
+
+def test_my_status_matches_the_account_email(radicale_url: str) -> None:
+    user = f"u{uuid.uuid4().hex[:10]}@example.com"
+    client = caldav.DAVClient(url=radicale_url, username=user, password="x", auth_type="basic")
+    cal = client.principal().make_calendar(name="Home", cal_id="home")
+    store = CaldavStore(IST, url=radicale_url, username=user.upper(), password="x", client=client)
+
+    def invite(uid: str, me_status: str) -> None:
+        cal.save_event(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\n"
+            f"UID:{uid}\r\nDTSTAMP:20261101T000000Z\r\n"
+            "DTSTART:20261103T060000Z\r\nDTEND:20261103T070000Z\r\nSUMMARY:Review\r\n"
+            "ORGANIZER:mailto:boss@example.com\r\n"
+            "ATTENDEE;PARTSTAT=ACCEPTED:mailto:boss@example.com\r\n"
+            f"ATTENDEE;PARTSTAT={me_status}:mailto:{user}\r\n"
+            "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+
+    invite("a", "NEEDS-ACTION")
+    invite("b", "DECLINED")
+    got = {e.id.split("|")[0]: e.my_status for e in store.list_events(at(3, 0), at(4, 0))}
+    assert got == {"a": "pending", "b": "declined"}
+    own = store.create_event(EventDraft(title="Mine", start=at(3, 12), end=at(3, 13)))
+    assert store.get_event(own.id).my_status is None

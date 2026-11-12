@@ -13,32 +13,48 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, tzinfo
+from datetime import date, datetime, time, timedelta, tzinfo
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
 from .models import (
+    Agenda,
     Availability,
     Calendar,
+    Conflict,
+    ConflictResult,
     DeleteResult,
     Event,
     EventDraft,
     EventList,
     EventPatch,
+    EventRef,
     FreeSlotResult,
     Recurrence,
     Span,
     TimeContext,
 )
-from .scheduling import find_free_slots
+from .scheduling import busy_time, find_conflicts, find_free_slots
 from .store import CalendarStore, InvalidRequestError
 from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
 
 MAX_RANGE = timedelta(days=366)
 MAX_ALARM_MINUTES = 4 * 7 * 24 * 60  # four weeks
+MAX_BUFFER_MINUTES = 240
+MAX_AGENDA_DAYS = 14
 ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
 DEFAULT_DURATION = timedelta(hours=1)
+
+
+def _conflict(pair: tuple[Event, Event, datetime, datetime]) -> Conflict:
+    a, b, start, end = pair
+    return Conflict(
+        start=start,
+        end=end,
+        overlap_minutes=int((end - start).total_seconds() // 60),
+        events=[EventRef.of(a), EventRef.of(b)],
+    )
 
 
 @contextmanager
@@ -194,17 +210,22 @@ class CalendarService:
         working_hours_end: str = "18:00",
         include_weekends: bool = False,
         max_slots: int = 20,
+        buffer_minutes: int = 0,
     ) -> FreeSlotResult:
         s, e = self._range(start, end)
         if not 5 <= duration_minutes <= 24 * 60:
             raise InvalidRequestError("duration_minutes must be between 5 and 1440.")
         if not 1 <= max_slots <= 200:
             raise InvalidRequestError("max_slots must be between 1 and 200.")
-        with _as_invalid_request():
-            day_start, day_end = parse_clock(working_hours_start), parse_clock(working_hours_end)
+        if not 0 <= buffer_minutes <= MAX_BUFFER_MINUTES:
+            raise InvalidRequestError(f"buffer_minutes must be between 0 and {MAX_BUFFER_MINUTES}.")
+        day_start, day_end = self._working_hours(working_hours_start, working_hours_end)
+        buffer = timedelta(minutes=buffer_minutes)
         s = max(s, self.now().replace(second=0, microsecond=0))  # no slots in the past
+        # Events just outside the window still push the buffer into it.
+        events = self.store.list_events(s - buffer, e + buffer, calendar_ids or None) if s < e else []
         slots, truncated = find_free_slots(
-            self.store.list_events(s, e, calendar_ids or None) if s < e else [],
+            events,
             window_start=s,
             window_end=e,
             duration=timedelta(minutes=duration_minutes),
@@ -213,8 +234,85 @@ class CalendarService:
             day_end=day_end,
             include_weekends=include_weekends,
             max_slots=max_slots,
+            buffer=buffer,
         )
         return FreeSlotResult(timezone=tz_name(self.tz), slots=slots, truncated=truncated)
+
+    @staticmethod
+    def _working_hours(start: str, end: str) -> tuple[time, time]:
+        with _as_invalid_request():
+            return parse_clock(start), parse_clock(end)
+
+    def find_conflicts(
+        self, start: str, end: str, calendar_ids: list[str] | None = None, limit: int = 100
+    ) -> ConflictResult:
+        s, e = self._range(start, end)
+        limit = self._limit(limit)
+        pairs = [_conflict(p) for p in find_conflicts(self.store.list_events(s, e, calendar_ids or None))]
+        return ConflictResult(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            count=min(len(pairs), limit),
+            truncated=len(pairs) > limit,
+            conflicts=pairs[:limit],
+        )
+
+    def agenda(
+        self,
+        day: str | None = None,
+        days: int = 1,
+        calendar_ids: list[str] | None = None,
+        working_hours_start: str = "09:00",
+        working_hours_end: str = "18:00",
+        min_free_minutes: int = 30,
+    ) -> Agenda:
+        if not 1 <= days <= MAX_AGENDA_DAYS:
+            raise InvalidRequestError(f"days must be between 1 and {MAX_AGENDA_DAYS}.")
+        if not 5 <= min_free_minutes <= 24 * 60:
+            raise InvalidRequestError("min_free_minutes must be between 5 and 1440.")
+        day_start, day_end = self._working_hours(working_hours_start, working_hours_end)
+        now = self.now().replace(microsecond=0)
+        first = self._parse(day, "day").date() if day else now.date()
+        s, e = start_of_day(first, self.tz), start_of_day(first + timedelta(days=days), self.tz)
+
+        events = [ev for ev in self.store.list_events(s, e, calendar_ids or None) if ev.status != "canceled"]
+        events.sort(key=lambda ev: (ev.start, ev.title))
+        timed = [ev for ev in events if not ev.all_day]
+        attending = [ev for ev in timed if ev.my_status != "declined"]
+
+        busy = timedelta(0)
+        for i in range(days):
+            d = first + timedelta(days=i)
+            ws = datetime.combine(d, day_start, tzinfo=self.tz)
+            we = datetime.combine(d if day_end > day_start else d + ONE_DAY, day_end, tzinfo=self.tz)
+            busy += busy_time(timed, (ws, we))
+
+        free, _ = find_free_slots(
+            timed,
+            window_start=max(s, now.replace(second=0)),
+            window_end=e,
+            duration=timedelta(minutes=min_free_minutes),
+            tz=self.tz,
+            day_start=day_start,
+            day_end=day_end,
+            include_weekends=True,
+            max_slots=50,
+        )
+        return Agenda(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            now=now,
+            happening_now=[EventRef.of(ev) for ev in attending if ev.start <= now < ev.end],
+            up_next=next((EventRef.of(ev) for ev in attending if ev.start > now), None),
+            all_day=[EventRef.of(ev) for ev in events if ev.all_day],
+            events=[EventRef.of(ev) for ev in timed],
+            busy_minutes=int(busy.total_seconds() // 60),
+            free_time=free,
+            conflicts=[_conflict(p) for p in find_conflicts(timed)],
+            invitations=[EventRef.of(ev) for ev in events if ev.my_status == "pending"],
+        )
 
     # ------------------------------------------------------------ commands
     def create_event(

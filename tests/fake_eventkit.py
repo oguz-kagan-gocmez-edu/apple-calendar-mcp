@@ -154,6 +154,23 @@ class EKRecurrenceRule:
         return self._end
 
 
+class EKParticipant:
+    def __init__(self, name: str, email: str, status: int, *, me: bool = False) -> None:
+        self._name, self._url, self._status, self._me = name, NSURL(f"mailto:{email}"), status, me
+
+    def name(self) -> str:
+        return self._name
+
+    def URL(self) -> NSURL:
+        return self._url
+
+    def participantStatus(self) -> int:
+        return self._status
+
+    def isCurrentUser(self) -> bool:
+        return self._me
+
+
 class EKEvent:
     def __init__(self, store: EKEventStore) -> None:
         self._store = store
@@ -167,6 +184,7 @@ class EKEvent:
         self._rules: list[EKRecurrenceRule] | None = None
         self._calendar: EKCalendar | None = None
         self._availability = 0
+        self._attendees: list[EKParticipant] | None = None
 
     @classmethod
     def eventWithEventStore_(cls, store: EKEventStore) -> EKEvent:
@@ -221,8 +239,8 @@ class EKEvent:
     def organizer(self) -> None:
         return None
 
-    def attendees(self) -> None:
-        return None
+    def attendees(self) -> list[EKParticipant] | None:
+        return self._attendees
 
     # setters
     def setTitle_(self, v: str) -> None:

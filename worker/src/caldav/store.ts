@@ -107,6 +107,8 @@ function mailto(value: unknown): string | null {
 export class CaldavStore implements CalendarStore {
   readonly client: DavClient;
   private readonly key: string;
+  /** The account's email, to find your own reply among the attendees (iCloud logs in with it). */
+  private readonly me: string | null;
 
   constructor(
     readonly zone: Zone,
@@ -115,6 +117,7 @@ export class CaldavStore implements CalendarStore {
     const url = config.url || DEFAULT_ICLOUD_URL;
     this.client = new DavClient(url, config.username, config.password, config.fetcher);
     this.key = `${url}\n${config.username}`;
+    this.me = config.username.includes("@") ? config.username.trim().toLowerCase() : null;
   }
 
   // ------------------------------------------------------------ calendars
@@ -304,6 +307,7 @@ export class CaldavStore implements CalendarStore {
       status: STATUS[String(comp.getFirstPropertyValue("status") ?? "").toUpperCase()] ?? "none",
       organizer: organizer ? (organizer.getParameter("cn") as string | undefined) || mailto(organizer.getFirstValue()) : null,
       attendees,
+      my_status: this.me ? (attendees.find((a) => a.email?.trim().toLowerCase() === this.me)?.status ?? null) : null,
     };
   }
 

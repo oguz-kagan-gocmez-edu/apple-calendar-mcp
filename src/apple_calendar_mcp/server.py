@@ -19,8 +19,10 @@ from pydantic import Field
 
 from . import __version__
 from .models import (
+    Agenda,
     Availability,
     Calendar,
+    ConflictResult,
     DeleteResult,
     Event,
     EventList,
@@ -38,6 +40,7 @@ INSTRUCTIONS = """\
 Tools for the user's Apple Calendar (every account synced into macOS Calendar).
 
 * Call get_time_context first when the request is relative ("tomorrow", "next Friday").
+* For "what's my day like?" use agenda; it already includes free time and overlaps.
 * Times are ISO 8601. Times without an offset are in the user's time zone.
 * Event ids are opaque and identify one occurrence of a recurring event; copy them exactly.
 * Recurring events: span='this' changes one occurrence, 'future' this and later ones,
@@ -144,10 +147,13 @@ def build_server(
         working_hours_end: Annotated[str, Field(description="'HH:MM', 24h.")] = "18:00",
         include_weekends: bool = False,
         max_slots: Annotated[int, Field(ge=1, le=200)] = 20,
+        buffer_minutes: Annotated[
+            int, Field(ge=0, le=240, description="Keep this much time clear before and after other events.")
+        ] = 0,
     ) -> FreeSlotResult:
         """Gaps of at least duration_minutes within working hours.
 
-        Ignores all-day events, events marked 'free' and canceled events.
+        Ignores all-day events, events marked 'free', canceled events and invitations you declined.
         """
         return _guard(
             lambda: service.find_free_slots(
@@ -159,8 +165,42 @@ def build_server(
                 working_hours_end,
                 include_weekends,
                 max_slots,
+                buffer_minutes,
             )
         )
+
+    @mcp.tool(annotations=READ)
+    def agenda(
+        day: Annotated[str | None, Field(description="First day, e.g. '2026-11-03'. Default: today.")] = None,
+        days: Annotated[int, Field(ge=1, le=14, description="How many days to cover.")] = 1,
+        calendar_ids: CalendarIds = None,
+        working_hours_start: Annotated[str, Field(description="'HH:MM', 24h.")] = "09:00",
+        working_hours_end: Annotated[str, Field(description="'HH:MM', 24h.")] = "18:00",
+        min_free_minutes: Annotated[
+            int, Field(ge=5, le=1440, description="Shortest gap worth listing as free time.")
+        ] = 30,
+    ) -> Agenda:
+        """A day (or a few) at a glance in one call: what's on now and next, all-day items,
+        every timed event, how busy the working hours are, free gaps left, overlapping
+        events and invitations not answered yet. Use it for "what does my day look like?"."""
+        return _guard(
+            lambda: service.agenda(
+                day, days, calendar_ids, working_hours_start, working_hours_end, min_free_minutes
+            )
+        )
+
+    @mcp.tool(annotations=READ)
+    def find_conflicts(
+        start: Annotated[str, Field(description="Range start, e.g. '2026-11-02'.")],
+        end: Annotated[str, Field(description="Range end. A bare date is inclusive (whole day).")],
+        calendar_ids: CalendarIds = None,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 100,
+    ) -> ConflictResult:
+        """Pairs of timed events that overlap and both take the time (double bookings).
+
+        Skips all-day events, events marked 'free', canceled events and invitations you declined.
+        """
+        return _guard(lambda: service.find_conflicts(start, end, calendar_ids, limit))
 
     if read_only:
         return mcp

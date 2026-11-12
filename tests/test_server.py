@@ -17,6 +17,8 @@ READ_TOOLS = {
     "search_events",
     "get_event",
     "find_free_slots",
+    "agenda",
+    "find_conflicts",
 }
 WRITE_TOOLS = {"create_event", "update_event", "delete_event"}
 
@@ -105,3 +107,25 @@ async def test_calendars_and_free_slots(service: CalendarService) -> None:
             client, "find_free_slots", {"start": "2026-11-03", "end": "2026-11-03", "duration_minutes": 120}
         )
         assert slots["slots"][0]["start"] == "2026-11-03T09:00:00+03:00"
+
+
+async def test_agenda_and_conflicts(service: CalendarService) -> None:
+    service.create_event("Lecture", "2026-11-02T10:00", end="2026-11-02T12:00")
+    service.create_event("Lunch", "2026-11-02T11:30", duration_minutes=60)
+    async with Client(build_server(service)) as client:
+        a = await call(client, "agenda", {})
+        assert a["up_next"]["title"] == "Lecture"
+        assert a["busy_minutes"] == 150 and len(a["conflicts"]) == 1
+        assert a["free_time"][0] == {
+            "start": "2026-11-02T09:00:00+03:00",
+            "end": "2026-11-02T10:00:00+03:00",
+            "duration_minutes": 60,
+        }
+        c = await call(client, "find_conflicts", {"start": "2026-11-02", "end": "2026-11-08"})
+        assert c["count"] == 1 and c["conflicts"][0]["overlap_minutes"] == 30
+        slots = await call(
+            client,
+            "find_free_slots",
+            {"start": "2026-11-02", "end": "2026-11-02", "duration_minutes": 60, "buffer_minutes": 30},
+        )
+        assert slots["slots"][0]["start"] == "2026-11-02T13:00:00+03:00"

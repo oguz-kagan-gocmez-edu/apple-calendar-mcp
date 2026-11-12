@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.models import Recurrence, Span
 from apple_calendar_mcp.service import CalendarService
 from apple_calendar_mcp.store import InvalidRequestError, NotFoundError, ReadOnlyCalendarError
@@ -207,3 +208,97 @@ def test_unknown_id(service: CalendarService) -> None:
 def test_timestamps_are_aware(service: CalendarService) -> None:
     e = service.create_event("X", "2026-11-03T14:00")
     assert e.start.utcoffset() == timedelta(hours=3)
+
+
+# ------------------------------------------------------------------ agenda, conflicts, free time
+@pytest.fixture
+def monday(service: CalendarService, store: MemoryStore) -> CalendarService:
+    """A busy Monday 2 Nov; the returned service's clock is 10:15 that day."""
+    service.create_event("Standup", "2026-11-02T09:00", duration_minutes=30)
+    service.create_event("Lecture", "2026-11-02T10:00", end="2026-11-02T12:00", location="B-101")
+    service.create_event("Lunch", "2026-11-02T11:30", duration_minutes=60)
+    declined = service.create_event("Optional sync", "2026-11-02T14:00")
+    store.set_my_status(declined.id, "declined")
+    invite = service.create_event("Design review", "2026-11-02T16:00")
+    store.set_my_status(invite.id, "pending")
+    service.create_event("Holiday", "2026-11-02", all_day=True)
+    service.create_event("Tomorrow", "2026-11-03T09:00")
+    return CalendarService(store, IST, clock=lambda: at(2, 10, 15))
+
+
+class TestAgenda:
+    def test_day_at_a_glance(self, monday: CalendarService) -> None:
+        a = monday.agenda()
+        assert (a.range_start, a.range_end) == (at(2, 0), at(3, 0))
+        assert [e.title for e in a.happening_now] == ["Lecture"]
+        assert a.up_next is not None and a.up_next.title == "Lunch"
+        assert [e.title for e in a.all_day] == ["Holiday"]
+        assert [e.title for e in a.events] == [
+            "Standup",
+            "Lecture",
+            "Lunch",
+            "Optional sync",
+            "Design review",
+        ]
+        # 30 (standup) + 150 (lecture and lunch, overlap counted once) + 60 (pending invite)
+        assert a.busy_minutes == 240
+        assert [(s.start, s.end) for s in a.free_time] == [
+            (at(2, 12, 30), at(2, 16)),  # the declined 14:00 sync doesn't block
+            (at(2, 17), at(2, 18)),
+        ]
+        assert len(a.conflicts) == 1
+        c = a.conflicts[0]
+        assert (c.start, c.end, c.overlap_minutes) == (at(2, 11, 30), at(2, 12), 30)
+        assert [e.title for e in c.events] == ["Lecture", "Lunch"]
+        assert [e.title for e in a.invitations] == ["Design review"]
+
+    def test_declined_event_is_never_next(self, monday: CalendarService) -> None:
+        later = CalendarService(monday.store, IST, clock=lambda: at(2, 13))
+        a = later.agenda()
+        assert a.happening_now == [] and a.up_next is not None and a.up_next.title == "Design review"
+
+    def test_other_day_and_multiple_days(self, monday: CalendarService) -> None:
+        a = monday.agenda(day="2026-11-03")
+        assert [e.title for e in a.events] == ["Tomorrow"] and a.up_next is not None
+        assert a.free_time[0].start == at(3, 10)
+        two = monday.agenda(days=2)
+        assert two.range_end == at(4, 0) and len(two.events) == 6
+        assert two.busy_minutes == 240 + 60
+
+    @pytest.mark.parametrize(
+        "kwargs", [{"days": 0}, {"days": 15}, {"min_free_minutes": 1}, {"working_hours_start": "25:00"}]
+    )
+    def test_rejects_invalid(self, service: CalendarService, kwargs: dict[str, object]) -> None:
+        with pytest.raises(InvalidRequestError):
+            service.agenda(**kwargs)  # type: ignore[arg-type]
+
+
+def test_find_conflicts(monday: CalendarService) -> None:
+    r = monday.find_conflicts("2026-11-02", "2026-11-03")
+    assert r.count == 1 and not r.truncated
+    assert [e.title for e in r.conflicts[0].events] == ["Lecture", "Lunch"]
+    monday.create_event("Office hours", "2026-11-02T09:15")  # overlaps standup, lecture
+    r = monday.find_conflicts("2026-11-02", "2026-11-02", limit=1)
+    assert r.count == 1 and r.truncated
+
+
+class TestFreeSlotsBufferAndDeclined:
+    def test_buffer_around_events(self, service: CalendarService) -> None:
+        service.create_event("Meeting", "2026-11-03T12:00")
+        r = service.find_free_slots("2026-11-03", "2026-11-03", 60, buffer_minutes=15)
+        assert [(s.start, s.end) for s in r.slots] == [(at(3, 9), at(3, 11, 45)), (at(3, 13, 15), at(3, 18))]
+
+    def test_buffer_from_event_before_the_range(self, service: CalendarService) -> None:
+        service.create_event("Early", "2026-11-03T09:00")
+        r = service.find_free_slots("2026-11-03T10:00", "2026-11-03", 60, buffer_minutes=15)
+        assert r.slots[0].start == at(3, 10, 15)
+
+    def test_declined_invitation_is_free(self, service: CalendarService, store: MemoryStore) -> None:
+        e = service.create_event("Big meeting", "2026-11-03T09:00", end="2026-11-03T18:00")
+        assert service.find_free_slots("2026-11-03", "2026-11-03", 60).slots == []
+        store.set_my_status(e.id, "declined")
+        assert len(service.find_free_slots("2026-11-03", "2026-11-03", 60).slots) == 1
+
+    def test_buffer_out_of_range(self, service: CalendarService) -> None:
+        with pytest.raises(InvalidRequestError):
+            service.find_free_slots("2026-11-03", "2026-11-03", 60, buffer_minutes=241)

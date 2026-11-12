@@ -24,10 +24,10 @@ async function mkcalendar(url: string, user: string, id: string, name: string): 
 }
 
 /** A fresh Radicale account with 'home' (default) and 'work' calendars. */
-export async function freshStore(): Promise<CaldavStore> {
+export async function freshStore(username?: string): Promise<CaldavStore> {
   resetCaches();
   const url = inject("radicaleUrl");
-  const user = `u${crypto.randomUUID().slice(0, 10).replace(/-/g, "")}`;
+  const user = username ?? `u${crypto.randomUUID().slice(0, 10).replace(/-/g, "")}`;
   await mkcalendar(url, user, "home", "Home");
   await mkcalendar(url, user, "work", "Work");
   return new CaldavStore(IST, { url, username: user, password: "x", defaultCalendar: "home" });

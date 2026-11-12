@@ -1,10 +1,14 @@
 /**
- * Free-slot search: pure interval arithmetic, no I/O (port of scheduling.py).
+ * Free-slot and conflict search: pure interval arithmetic, no I/O (port of scheduling.py).
  *
- * 1. Keep events that block time and sort them.               O(n log n)
- * 2. Merge overlapping busy intervals.                        O(n)
+ * Free slots:
+ * 1. Keep events that block time, pad them with the buffer, sort. O(n log n)
+ * 2. Merge overlapping busy intervals.                            O(n)
  * 3. Per day, intersect working hours with the window and
- *    subtract busy intervals with a two-pointer sweep.         O(n + d)
+ *    subtract busy intervals with a two-pointer sweep.             O(n + d)
+ *
+ * Conflicts: sort by start and sweep, keeping the events still running;
+ * each new event overlaps exactly those.                 O(n log n + k)
  */
 
 import type { Event, FreeSlot } from "./models";
@@ -12,9 +16,39 @@ import { type Zone, addDays, at, compareDates, weekday, MINUTE } from "./time";
 
 export type Interval = [number, number];
 
+/** Whether the event takes the time: not 'free', not canceled, not declined by you. */
 export function blocksTime(event: Event, ignoreAllDay: boolean): boolean {
-  if (event.status === "canceled" || event.availability === "free") return false;
+  if (event.status === "canceled" || event.availability === "free" || event.my_status === "declined") return false;
   return !(ignoreAllDay && event.all_day);
+}
+
+export type ConflictPair = [a: Event, b: Event, start: number, end: number];
+
+/**
+ * Pairs of timed events that both block time and overlap. ``a`` starts first
+ * (ties broken by end, then title). Touching events don't conflict.
+ */
+export function findConflicts(events: Iterable<Event>): ConflictPair[] {
+  const timed = [...events]
+    .filter((e) => blocksTime(e, true) && e.end > e.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end || (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+  let active: Event[] = [];
+  const found: ConflictPair[] = [];
+  for (const e of timed) {
+    active = active.filter((a) => a.end > e.start);
+    for (const a of active) found.push([a, e, e.start, Math.min(a.end, e.end)]);
+    active.push(e);
+  }
+  return found;
+}
+
+/** Milliseconds inside ``window`` covered by blocking timed events, overlaps counted once. */
+export function busyTime(events: Iterable<Event>, window: Interval): number {
+  const [wStart, wEnd] = window;
+  const busy = mergeIntervals(
+    [...events].filter((e) => blocksTime(e, true)).map((e): Interval => [Math.max(e.start, wStart), Math.min(e.end, wEnd)]),
+  );
+  return busy.reduce((sum, [s, e]) => sum + (e - s), 0);
 }
 
 /** Merge overlapping or touching intervals. Input order does not matter. */
@@ -61,6 +95,8 @@ export interface SlotOptions {
   includeWeekends?: boolean;
   ignoreAllDay?: boolean;
   maxSlots?: number;
+  /** Keep this much time clear before and after every busy event. */
+  bufferMs?: number;
 }
 
 /**
@@ -72,11 +108,16 @@ export function findFreeSlots(events: Iterable<Event>, o: SlotOptions): [FreeSlo
   const dayEnd = o.dayEnd ?? 18 * 60;
   const ignoreAllDay = o.ignoreAllDay ?? true;
   const maxSlots = o.maxSlots ?? 20;
+  const buffer = o.bufferMs ?? 0;
   if (o.durationMs <= 0) throw new RangeError("duration must be positive");
+  if (buffer < 0) throw new RangeError("buffer must not be negative");
   if (o.windowEnd <= o.windowStart) return [[], false];
 
+  // Zero-length markers (e.g. a 23:59 deadline) take no time, buffer or not.
   const busy = mergeIntervals(
-    [...events].filter((e) => blocksTime(e, ignoreAllDay)).map((e): Interval => [e.start, e.end]),
+    [...events]
+      .filter((e) => e.end > e.start && blocksTime(e, ignoreAllDay))
+      .map((e): Interval => [e.start - buffer, e.end + buffer]),
   );
   const slots: FreeSlot[] = [];
   let cursor = 0;

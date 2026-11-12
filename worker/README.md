@@ -1,6 +1,6 @@
 # apple-calendar-mcp on Cloudflare Workers
 
-The remote connector as a Cloudflare Worker, so it can run on the free plan with no server. It is a TypeScript port of the Python service layer and CalDAV backend: the same nine tools, names, descriptions and output shapes. Setup steps are in the [main README](../README.md#free-on-cloudflare-workers-recommended).
+The remote connector as a Cloudflare Worker, so it can run on the free plan with no server. It is a TypeScript port of the Python service layer and CalDAV backend: the same eleven tools, names, descriptions and output shapes. Setup steps are in the [main README](../README.md#free-on-cloudflare-workers-recommended).
 
 ## Layout
 

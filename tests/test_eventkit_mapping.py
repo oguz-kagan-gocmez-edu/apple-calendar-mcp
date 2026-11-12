@@ -134,3 +134,21 @@ def test_save_error_surfaces(store) -> None:  # type: ignore[no-untyped-def]
 
     with pytest.raises(BackendError, match="start date"):
         store.create_event(EventDraft(title="X", start=at(3, 10), end=at(3, 9)))
+
+
+def test_my_status_comes_from_the_current_user_attendee(store) -> None:  # type: ignore[no-untyped-def]
+    e = store.create_event(EventDraft(title="Invite", start=at(3, 9), end=at(3, 10)))
+    raw = store._store.events[e.id.split("|")[0]]
+    assert store.get_event(e.id).my_status is None  # own event, no attendees
+    raw._attendees = [
+        fk.EKParticipant("Ayşe", "ayse@x.com", 2),
+        fk.EKParticipant("Me", "me@x.com", 1, me=True),
+    ]
+    got = store.get_event(e.id)
+    assert got.my_status == "pending"
+    assert [(a.email, a.status) for a in got.attendees] == [
+        ("ayse@x.com", "accepted"),
+        ("me@x.com", "pending"),
+    ]
+    raw._attendees = [fk.EKParticipant("Ayşe", "ayse@x.com", 3)]
+    assert store.get_event(e.id).my_status is None  # someone else declined, not me

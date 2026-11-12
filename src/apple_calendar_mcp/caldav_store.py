@@ -158,6 +158,9 @@ class CaldavStore:
         self.tz = tz
         self.url = url
         self.default_calendar = default_calendar
+        # Your own address, to find your reply among an invite's attendees.
+        # For iCloud this is the Apple ID; invites to an alias won't match.
+        self._me = username.strip().casefold() if "@" in username else None
         # iCloud uses HTTP Basic over TLS; sending it up front saves a 401 round trip.
         self._client = client or DAVClient(
             url=url, username=username, password=password, auth_type="basic", timeout=30
@@ -271,6 +274,14 @@ class CaldavStore:
         attendees = comp.get("ATTENDEE", [])
         if not isinstance(attendees, list):
             attendees = [attendees]
+        people = [
+            Attendee(
+                name=str(a.params["CN"]) if a.params.get("CN") else None,
+                email=_mailto(a),
+                status=_PARTSTAT.get(str(a.params.get("PARTSTAT", "")).upper(), "unknown"),
+            )
+            for a in attendees
+        ]
         status = _STATUS.get(str(comp.get("STATUS", "")).upper(), "none")
         availability: Availability = (
             "free" if str(comp.get("TRANSP", "")).upper() == "TRANSPARENT" else "busy"
@@ -294,14 +305,10 @@ class CaldavStore:
             organizer=(str(organizer.params.get("CN")) if organizer.params.get("CN") else _mailto(organizer))
             if organizer
             else None,
-            attendees=[
-                Attendee(
-                    name=str(a.params["CN"]) if a.params.get("CN") else None,
-                    email=_mailto(a),
-                    status=_PARTSTAT.get(str(a.params.get("PARTSTAT", "")).upper(), "unknown"),
-                )
-                for a in attendees
-            ],
+            attendees=people,
+            my_status=next(
+                (p.status for p in people if self._me and (p.email or "").casefold() == self._me), None
+            ),
         )
 
     @staticmethod

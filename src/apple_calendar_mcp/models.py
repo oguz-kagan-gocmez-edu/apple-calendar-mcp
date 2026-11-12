@@ -100,6 +100,51 @@ class Event(_Model):
     status: EventStatus = "none"
     organizer: str | None = None
     attendees: list[Attendee] = Field(default_factory=list)
+    my_status: AttendeeStatus | None = Field(
+        None,
+        description="Your own reply when you're invited ('pending' = not answered yet). "
+        "None when you aren't an attendee, e.g. your own events.",
+    )
+
+
+class EventRef(_Model):
+    """A compact pointer to one occurrence, for summaries."""
+
+    id: str
+    title: str
+    start: datetime
+    end: datetime
+    all_day: bool = False
+    calendar_title: str
+    location: str | None = None
+
+    @classmethod
+    def of(cls, e: Event) -> EventRef:
+        return cls(
+            id=e.id,
+            title=e.title,
+            start=e.start,
+            end=e.end,
+            all_day=e.all_day,
+            calendar_title=e.calendar_title,
+            location=e.location,
+        )
+
+
+class Conflict(_Model):
+    start: datetime = Field(description="Start of the overlap.")
+    end: datetime = Field(description="End of the overlap (exclusive).")
+    overlap_minutes: int
+    events: list[EventRef] = Field(description="The two events that overlap.")
+
+
+class ConflictResult(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    count: int
+    truncated: bool
+    conflicts: list[Conflict]
 
 
 class EventList(_Model):
@@ -121,6 +166,25 @@ class FreeSlotResult(_Model):
     timezone: str
     slots: list[FreeSlot]
     truncated: bool
+
+
+class Agenda(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    now: datetime
+    happening_now: list[EventRef] = Field(description="Timed events in progress right now.")
+    up_next: EventRef | None = Field(description="The next timed event that hasn't started yet.")
+    all_day: list[EventRef]
+    events: list[EventRef] = Field(
+        description="Timed events in the range, by start (canceled ones left out)."
+    )
+    busy_minutes: int = Field(
+        description="Time blocked by events within working hours, overlaps counted once."
+    )
+    free_time: list[FreeSlot] = Field(description="Free gaps left within working hours, from now on.")
+    conflicts: list[Conflict]
+    invitations: list[EventRef] = Field(description="Events you're invited to and haven't answered.")
 
 
 class DeleteResult(_Model):

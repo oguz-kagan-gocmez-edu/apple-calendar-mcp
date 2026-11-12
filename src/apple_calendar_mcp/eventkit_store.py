@@ -264,14 +264,16 @@ class EventKitStore:
             end = datetime.combine(max(last, start.date()) + ONE_DAY, time.min, tzinfo=self.tz)
 
         occurrence = ev.occurrenceDate() or ev.startDate()
+        participants = list(ev.attendees() or [])
         attendees = [
             Attendee(
                 name=str(p.name()) if p.name() else None,
                 email=_mailto(p.URL()),
                 status=_PARTICIPANT.get(int(p.participantStatus()), "unknown"),
             )
-            for p in (ev.attendees() or [])
+            for p in participants
         ]
+        me = next((i for i, p in enumerate(participants) if p.isCurrentUser()), None)
         organizer = ev.organizer()
         alarms = [
             round(-a.relativeOffset() / 60)
@@ -297,6 +299,7 @@ class EventKitStore:
             status=_STATUS.get(int(ev.status()), "none"),
             organizer=str(organizer.name()) if organizer is not None and organizer.name() else None,
             attendees=attendees,
+            my_status=attendees[me].status if me is not None else None,
         )
 
     def _make_rule(self, rec: Recurrence) -> Any:
