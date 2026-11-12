@@ -37,6 +37,7 @@ VIA_APP_ENV = "APPLE_CALENDAR_MCP_VIA_APP"
 NO_APP_ENV = "APPLE_CALENDAR_MCP_NO_APP"
 
 USAGE_TEXT = "Lets Claude read and manage your calendar events through the apple-calendar-mcp server."
+REMINDERS_USAGE_TEXT = "Lets Claude read and manage your reminders through the apple-calendar-mcp server."
 
 Runner = Callable[..., Any]
 
@@ -61,6 +62,8 @@ def info_plist() -> bytes:
             "LSUIElement": True,  # no Dock icon
             "NSCalendarsFullAccessUsageDescription": USAGE_TEXT,  # macOS 14+
             "NSCalendarsUsageDescription": USAGE_TEXT,  # macOS 13
+            "NSRemindersFullAccessUsageDescription": REMINDERS_USAGE_TEXT,  # macOS 14+
+            "NSRemindersUsageDescription": REMINDERS_USAGE_TEXT,  # macOS 13
         }
     )
 

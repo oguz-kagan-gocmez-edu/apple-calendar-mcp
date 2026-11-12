@@ -26,6 +26,8 @@ def test_info_plist_declares_calendar_access() -> None:
     assert plist["CFBundleExecutable"] == macos_app.EXECUTABLE
     assert plist["NSCalendarsFullAccessUsageDescription"]
     assert plist["NSCalendarsUsageDescription"]
+    assert plist["NSRemindersFullAccessUsageDescription"]
+    assert plist["NSRemindersUsageDescription"]
     assert plist["LSUIElement"] is True
 
 

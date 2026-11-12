@@ -409,3 +409,17 @@ def seed_demo(store: MemoryStore, today: date | None = None) -> None:
             availability="free",
         )
     )
+
+
+def seed_demo_reminders(todo: Any, today: date | None = None) -> None:
+    """A few reminders for the demo: one overdue, one today, one undated."""
+    from .models import ReminderDraft
+
+    tz = todo.tz
+    today = today or datetime.now(tz).date()
+    midnight = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+    todo.create_reminder(
+        ReminderDraft(title="Submit lab report", due=midnight - ONE_DAY, due_all_day=True, priority="high")
+    )
+    todo.create_reminder(ReminderDraft(title="Call the dentist", due=midnight + timedelta(hours=17)))
+    todo.create_reminder(ReminderDraft(title="Oat milk", list_id="groceries"))

@@ -319,6 +319,73 @@ class TimeContext(_Model):
     iso_week: int
 
 
+# ---------------------------------------------------------------- reminders
+Priority = Literal["none", "high", "medium", "low"]
+ReminderStatus = Literal["open", "completed", "all"]
+
+
+class ReminderList(_Model):
+    id: str
+    title: str
+    source: str | None = None
+    color: str | None = None
+    writable: bool
+    is_default: bool = False
+
+
+class Reminder(_Model):
+    id: str = Field(description="Opaque id. Pass it to update/complete/delete.")
+    list_id: str
+    list_title: str
+    title: str
+    notes: str | None = None
+    due: datetime | None = Field(None, description="When it is due; for a date-only due, local midnight.")
+    due_all_day: bool = Field(False, description="True when the due has a date but no time.")
+    overdue: bool = False
+    priority: Priority = "none"
+    completed: bool = False
+    completed_at: datetime | None = None
+    is_recurring: bool = Field(False, description="Repeats (read-only here; edit the rule in Reminders).")
+
+
+class ReminderResult(_Model):
+    timezone: str
+    count: int
+    truncated: bool
+    reminders: list[Reminder]
+
+
+class ReminderDeleted(_Model):
+    deleted: bool
+    reminder_id: str
+    title: str
+
+
+class ReminderDraft(_Model):
+    title: str
+    list_id: str | None = None
+    notes: str | None = None
+    due: datetime | None = None
+    due_all_day: bool = False
+    priority: Priority = "none"
+
+
+class ReminderPatch(_Model):
+    """Partial update. ``None`` means 'leave unchanged'; for notes '' clears."""
+
+    title: str | None = None
+    list_id: str | None = None
+    notes: str | None = None
+    due: datetime | None = None
+    due_all_day: bool = False
+    clear_due: bool = False
+    priority: Priority | None = None
+    completed: bool | None = None
+
+    def is_empty(self) -> bool:
+        return not self.model_dump(exclude_defaults=True)
+
+
 # ---------------------------------------------------------------- write models
 class EventDraft(_Model):
     """Fully-specified new event (validated by the service layer)."""

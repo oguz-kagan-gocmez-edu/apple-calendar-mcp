@@ -4,6 +4,7 @@
     apple-calendar-mcp --read-only     # expose only the read tools
     apple-calendar-mcp --hidden-calendars Family --read-only-calendars Work
                                        # per-calendar access (ids or titles)
+    apple-calendar-mcp --no-reminders  # calendar only: no Reminders tools, no Reminders prompt
     apple-calendar-mcp --backend memory --demo   # fake data, any OS
     apple-calendar-mcp doctor          # check/prompt calendar permission
     apple-calendar-mcp install-app     # build the helper app that owns the permission (macOS)
@@ -24,7 +25,9 @@ from pathlib import Path
 
 from . import __version__, macos_app
 from .access import AccessControlledStore, AccessPolicy
-from .memory_store import MemoryStore, seed_demo
+from .memory_store import MemoryStore, seed_demo, seed_demo_reminders
+from .models import Calendar
+from .reminders import AccessControlledReminders, MemoryReminderStore, ReminderStore
 from .server import build_server
 from .service import CalendarService
 from .store import CalendarError, CalendarStore
@@ -58,6 +61,15 @@ def caldav_store_from_env(tz: tzinfo) -> CalendarStore:
     )
 
 
+NO_REMINDERS_ENV = "APPLE_CALENDAR_NO_REMINDERS"
+
+
+def reminders_enabled(args: argparse.Namespace) -> bool:
+    if getattr(args, "no_reminders", False):
+        return False
+    return os.environ.get(NO_REMINDERS_ENV, "").strip().lower() not in ("1", "true", "yes")
+
+
 ACCESS_ENV = {
     "read_only_calendars": "APPLE_CALENDAR_READ_ONLY_CALENDARS",
     "hidden_calendars": "APPLE_CALENDAR_HIDDEN_CALENDARS",
@@ -74,16 +86,24 @@ def access_policy(args: argparse.Namespace) -> AccessPolicy:
 
 
 def _make_store(
-    backend: str, tz_override: str | None, demo: bool, policy: AccessPolicy | None = None
+    backend: str,
+    tz_override: str | None,
+    demo: bool,
+    policy: AccessPolicy | None = None,
+    reminders: bool = True,
 ) -> tuple[CalendarStore, CalendarService]:
     tz = resolve_local_tz(tz_override)
     store: CalendarStore
+    # Only EventKit can reach Reminders; iCloud doesn't serve them over CalDAV.
+    todo: ReminderStore | None = None
     if backend == "caldav":
         store = caldav_store_from_env(tz)
     elif backend == "memory":
         mem = MemoryStore(tz)
+        todo = MemoryReminderStore(tz)
         if demo:
             seed_demo(mem)
+            seed_demo_reminders(todo)
         store = mem
     else:
         if sys.platform != "darwin":
@@ -92,10 +112,13 @@ def _make_store(
             )
         from .eventkit_store import EventKitStore
 
-        store = EventKitStore(tz)
+        ek = EventKitStore(tz)
+        store, todo = ek, ek
     if policy is not None and not policy.is_open:
         store = AccessControlledStore(store, policy)
-    return store, CalendarService(store, tz)
+        if todo is not None:
+            todo = AccessControlledReminders(todo, policy)
+    return store, CalendarService(store, tz, reminders=todo if reminders else None)
 
 
 def _print_calendars(store: CalendarStore, tz: tzinfo, policy: AccessPolicy) -> None:
@@ -153,6 +176,19 @@ def _doctor(args: argparse.Namespace) -> int:
         return 1
     print(f"permission (after) : {EventKitStore.authorization_status()}")
     _print_calendars(store, tz, policy)
+    if reminders_enabled(args):
+        try:
+            lists = store.list_reminder_lists()  # asks for Reminders access if needed
+        except CalendarError as exc:
+            print(f"reminders          : ERROR: {exc}")
+            return 1
+        print(f"reminders          : {EventKitStore.authorization_status('reminders')}, {len(lists)} lists")
+        for rl in lists:
+            level = policy.level(Calendar(id=rl.id, title=rl.title, writable=rl.writable))
+            flag = "hidden" if level == "hidden" else "ro" if level == "read" or not rl.writable else "rw"
+            print(f"  [{flag}] {rl.title}  ({rl.source})  id={rl.id}{'  (default)' if rl.is_default else ''}")
+    else:
+        print("reminders          : off (--no-reminders)")
     if not os.environ.get(macos_app.VIA_APP_ENV):
         print(
             "\nNote: macOS grants calendar access per *host app*. This check used the app\n"
@@ -200,6 +236,11 @@ def main(argv: list[str] | None = None) -> int:
             metavar="NAMES",
             help=f"{what}: comma-separated ids or titles (default: ${env})",
         )
+    parser.add_argument(
+        "--no-reminders",
+        action="store_true",
+        help=f"leave out the Reminders tools (default: ${NO_REMINDERS_ENV})",
+    )
     parser.add_argument("--timezone", help="IANA zone, e.g. Europe/Istanbul (default: system)")
     parser.add_argument("--log-level", default="WARNING")
     parser.add_argument(
@@ -241,7 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve-http":
         return _serve_http(args)
 
-    _, service = _make_store(args.backend, args.timezone, args.demo, access_policy(args))
+    _, service = _make_store(
+        args.backend, args.timezone, args.demo, access_policy(args), reminders_enabled(args)
+    )
     log.info("serving backend=%s tz=%s read_only=%s", args.backend, tz_name(service.tz), args.read_only)
     build_server(service, read_only=args.read_only).run("stdio")
     return 0
