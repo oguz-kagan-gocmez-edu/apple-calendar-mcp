@@ -20,16 +20,13 @@
       "command": "uv",
       "args": [
         "run",
-        "--frozen",
+        "--locked",
         "--no-dev",
         "--quiet",
         "--project",
         "${CLAUDE_PLUGIN_ROOT}",
         "apple-calendar-mcp"
-      ],
-      "env": {
-        "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/venv"
-      }
+      ]
     }
   }
 }

@@ -23,8 +23,8 @@ Event titles, notes and locations are written by other people (anyone can send a
 If a tool says macOS refused calendar access, or that access was never granted, the one-time setup hasn't been done. It needs the Xcode Command Line Tools (`xcode-select --install`). Tell the user, then, with their go-ahead, run these two commands in a terminal on their Mac:
 
 ```bash
-UV_PROJECT_ENVIRONMENT="${CLAUDE_PLUGIN_DATA}/venv" uv run --frozen --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp install-app
-UV_PROJECT_ENVIRONMENT="${CLAUDE_PLUGIN_DATA}/venv" uv run --frozen --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp doctor
+uv run --locked --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp install-app
+uv run --locked --no-dev --project "${CLAUDE_PLUGIN_ROOT}" apple-calendar-mcp doctor
 ```
 
 `install-app` builds a small helper app, `~/Applications/Apple Calendar MCP.app`, that holds the calendar permission. `doctor` makes macOS show the permission prompt: the user must choose **Allow Full Access** ("Add Events Only" can't read events). Then restart the session so the server starts again.
