@@ -264,6 +264,7 @@ describe("mcp", () => {
       agenda: true,
       find_conflicts: true,
       find_duplicates: true,
+      calendar_stats: true,
       export_ics: true,
       create_event: false,
       update_event: false,

@@ -26,11 +26,14 @@ from .models import (
     BatchChange,
     BatchResult,
     Calendar,
+    CalendarStats,
+    CalendarUsage,
     ChangeInfo,
     ChangeOutcome,
     Conflict,
     ConflictResult,
     CreateChange,
+    DayStats,
     DeleteChange,
     DeleteResult,
     DuplicateGroup,
@@ -43,14 +46,32 @@ from .models import (
     FreeSlotResult,
     IcsExport,
     ImportResult,
+    Priority,
     Recurrence,
+    Reminder,
+    ReminderDeleted,
+    ReminderDraft,
+    ReminderList,
+    ReminderPatch,
+    ReminderResult,
+    ReminderStatus,
     Reply,
     SkippedItem,
     Span,
     TimeContext,
+    TitleUsage,
     UndoResult,
+    WeekdayStats,
 )
-from .scheduling import busy_time, duplicate_key, find_conflicts, find_duplicates, find_free_slots
+from .reminders import ReminderStore, is_overdue
+from .scheduling import (
+    blocks_time,
+    busy_time,
+    duplicate_key,
+    find_conflicts,
+    find_duplicates,
+    find_free_slots,
+)
 from .store import (
     CalendarError,
     CalendarStore,
@@ -59,7 +80,15 @@ from .store import (
     make_event_id,
     split_event_id,
 )
-from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
+from .timeutil import (
+    ONE_DAY,
+    is_date_only,
+    overlaps,
+    parse_clock,
+    parse_datetime,
+    start_of_day,
+    tz_name,
+)
 
 MAX_RANGE = timedelta(days=366)
 MAX_ALARM_MINUTES = 4 * 7 * 24 * 60  # four weeks
@@ -101,8 +130,10 @@ class CalendarService:
         store: CalendarStore,
         tz: tzinfo,
         clock: Callable[[], datetime] | None = None,
+        reminders: ReminderStore | None = None,
     ) -> None:
         self.store = store
+        self.reminders = reminders
         self.tz = tz
         self._clock = clock or (lambda: datetime.now(tz))
         self.journal = ChangeJournal()
@@ -366,6 +397,102 @@ class CalendarService:
             invitations=[EventRef.of(ev) for ev in events if ev.my_status == "pending"],
         )
 
+    def calendar_stats(
+        self,
+        start: str,
+        end: str,
+        calendar_ids: list[str] | None = None,
+        working_hours_start: str = "09:00",
+        working_hours_end: str = "18:00",
+    ) -> CalendarStats:
+        """Where the time goes in a range: busy time per day, weekday, calendar and title."""
+        s, e = self._range(start, end)
+        day_start, day_end = self._working_hours(working_hours_start, working_hours_end)
+        events = [ev for ev in self.store.list_events(s, e, calendar_ids or None) if ev.status != "canceled"]
+        timed = [ev for ev in events if not ev.all_day]
+        taking = [ev for ev in timed if blocks_time(ev, ignore_all_day=True) and ev.end > ev.start]
+
+        def minutes(span: timedelta) -> int:
+            return int(span.total_seconds() // 60)
+
+        def clipped(ev: Event) -> timedelta:
+            return max(min(ev.end, e) - max(ev.start, s), timedelta(0))
+
+        days: list[DayStats] = []
+        in_hours = timedelta(0)
+        d = s.astimezone(self.tz).date()
+        while start_of_day(d, self.tz) < e:
+            ds, de = max(start_of_day(d, self.tz), s), min(start_of_day(d + ONE_DAY, self.tz), e)
+            days.append(
+                DayStats(
+                    date=d,
+                    weekday=d.strftime("%A"),
+                    events=sum(1 for ev in events if overlaps(ev.start, ev.end, ds, de)),
+                    busy_minutes=minutes(busy_time(timed, (ds, de))),
+                )
+            )
+            ws = datetime.combine(d, day_start, tzinfo=self.tz)
+            we = datetime.combine(d if day_end > day_start else d + ONE_DAY, day_end, tzinfo=self.tz)
+            if max(ws, s) < min(we, e):
+                in_hours += busy_time(timed, (max(ws, s), min(we, e)))
+            d += ONE_DAY
+
+        weekdays: list[WeekdayStats] = []
+        for name in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
+            same = [x for x in days if x.weekday == name]
+            if same:
+                total = sum(x.busy_minutes for x in same)
+                weekdays.append(
+                    WeekdayStats(
+                        weekday=name,
+                        days=len(same),
+                        busy_minutes=total,
+                        average_busy_minutes=total // len(same),
+                    )
+                )
+
+        per_cal: dict[str, CalendarUsage] = {}
+        for ev in events:
+            use = per_cal.setdefault(
+                ev.calendar_id,
+                CalendarUsage(
+                    calendar_id=ev.calendar_id, calendar_title=ev.calendar_title, events=0, minutes=0
+                ),
+            )
+            use.events += 1
+        for ev in taking:
+            per_cal[ev.calendar_id].minutes += minutes(clipped(ev))
+
+        per_title: dict[str, TitleUsage] = {}
+        for ev in taking:
+            key = " ".join(ev.title.casefold().split())
+            row = per_title.setdefault(key, TitleUsage(title=ev.title, events=0, minutes=0))
+            row.events += 1
+            row.minutes += minutes(clipped(ev))
+
+        busy = sum(x.busy_minutes for x in days)
+        busiest = max(days, key=lambda x: x.busy_minutes, default=None)
+        return CalendarStats(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            events=len(events),
+            timed_events=len(timed),
+            busy_minutes=busy,
+            busy_minutes_in_working_hours=minutes(in_hours),
+            busy_minutes_outside_working_hours=busy - minutes(in_hours),
+            average_event_minutes=(
+                minutes(sum((ev.end - ev.start for ev in taking), timedelta(0))) // len(taking)
+                if taking
+                else 0
+            ),
+            busiest_day=busiest if busiest and busiest.busy_minutes else None,
+            days=days,
+            by_weekday=weekdays,
+            by_calendar=sorted(per_cal.values(), key=lambda u: (-u.minutes, -u.events, u.calendar_title)),
+            top_titles=sorted(per_title.values(), key=lambda u: (-u.minutes, -u.events, u.title))[:10],
+        )
+
     # ------------------------------------------------------------ commands
     def create_event(
         self,
@@ -589,6 +716,135 @@ class CalendarService:
             span=span,
             title=before.title,
         )
+
+    # ------------------------------------------------------------ reminders
+    @property
+    def has_reminders(self) -> bool:
+        return self.reminders is not None
+
+    def _reminder_store(self) -> ReminderStore:
+        if self.reminders is None:
+            raise InvalidRequestError(
+                "Reminders aren't available here: only the macOS (EventKit) backend can reach them."
+            )
+        return self.reminders
+
+    def _with_overdue(self, r: Reminder) -> Reminder:
+        return r.model_copy(update={"overdue": is_overdue(r, self.now())})
+
+    def _due(self, value: str) -> tuple[datetime, bool]:
+        """A due date or date-time; a bare date means 'that day', with no time."""
+        return self._parse(value, "due"), is_date_only(value)
+
+    @staticmethod
+    def _reminder_title(title: str) -> str:
+        title = title.strip()
+        if not title:
+            raise InvalidRequestError("title must not be empty.")
+        return title
+
+    def list_reminder_lists(self) -> list[ReminderList]:
+        return self._reminder_store().list_reminder_lists()
+
+    def list_reminders(
+        self,
+        list_ids: list[str] | None = None,
+        status: ReminderStatus = "open",
+        due_before: str | None = None,
+        query: str | None = None,
+        limit: int = 200,
+    ) -> ReminderResult:
+        store = self._reminder_store()
+        limit = self._limit(limit)
+        found: list[Reminder] = []
+        if status in ("open", "all"):
+            found += store.list_reminders(list_ids or None, completed=False)
+        if status in ("completed", "all"):
+            found += store.list_reminders(list_ids or None, completed=True)
+        if due_before:
+            cutoff = self._parse(due_before, "due_before")
+            if is_date_only(due_before):
+                cutoff += ONE_DAY  # the whole day counts
+            found = [r for r in found if r.due is not None and r.due < cutoff]
+        if query and query.strip():
+            terms = query.casefold().split()
+            found = [r for r in found if all(t in f"{r.title} {r.notes or ''}".casefold() for t in terms)]
+        rank = {"high": 0, "medium": 1, "low": 2, "none": 3}
+        far = datetime.max.replace(tzinfo=self.tz)
+        found.sort(
+            key=lambda r: (
+                r.completed,
+                r.due is None,
+                r.due or far,
+                rank[r.priority],
+                r.title.casefold(),
+            )
+        )
+        return ReminderResult(
+            timezone=tz_name(self.tz),
+            count=min(len(found), limit),
+            truncated=len(found) > limit,
+            reminders=[self._with_overdue(r) for r in found[:limit]],
+        )
+
+    def get_reminder(self, reminder_id: str) -> Reminder:
+        return self._with_overdue(self._reminder_store().get_reminder(reminder_id))
+
+    def create_reminder(
+        self,
+        title: str,
+        list_id: str | None = None,
+        due: str | None = None,
+        notes: str | None = None,
+        priority: Priority = "none",
+    ) -> Reminder:
+        store = self._reminder_store()
+        when, all_day = self._due(due) if due else (None, False)
+        draft = ReminderDraft(
+            title=self._reminder_title(title),
+            list_id=list_id,
+            notes=notes or None,
+            due=when,
+            due_all_day=all_day,
+            priority=priority,
+        )
+        return self._with_overdue(store.create_reminder(draft))
+
+    def update_reminder(
+        self,
+        reminder_id: str,
+        title: str | None = None,
+        list_id: str | None = None,
+        due: str | None = None,
+        clear_due: bool = False,
+        notes: str | None = None,
+        priority: Priority | None = None,
+        completed: bool | None = None,
+    ) -> Reminder:
+        store = self._reminder_store()
+        if due is not None and clear_due:
+            raise InvalidRequestError("Pass either due or clear_due, not both.")
+        when, all_day = self._due(due) if due else (None, False)
+        patch = ReminderPatch(
+            title=self._reminder_title(title) if title is not None else None,
+            list_id=list_id,
+            notes=notes,
+            due=when,
+            due_all_day=all_day,
+            clear_due=clear_due,
+            priority=priority,
+            completed=completed,
+        )
+        if patch.is_empty():
+            raise InvalidRequestError("Nothing to update: pass at least one field.")
+        return self._with_overdue(store.update_reminder(reminder_id, patch))
+
+    def complete_reminder(self, reminder_id: str, completed: bool = True) -> Reminder:
+        return self.update_reminder(reminder_id, completed=completed)
+
+    def delete_reminder(self, reminder_id: str) -> ReminderDeleted:
+        before = self._reminder_store().delete_reminder(reminder_id)
+        return ReminderDeleted(deleted=True, reminder_id=reminder_id, title=before.title)
 
     # ------------------------------------------------------------ iCalendar
     def export_ics(self, start: str, end: str, calendar_ids: list[str] | None = None) -> IcsExport:

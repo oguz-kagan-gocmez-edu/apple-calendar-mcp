@@ -155,6 +155,50 @@ export interface ConflictResult {
   conflicts: Conflict[];
 }
 
+export interface DayStats {
+  /** YYYY-MM-DD */
+  date: string;
+  weekday: string;
+  events: number;
+  busy_minutes: number;
+}
+
+export interface WeekdayStats {
+  weekday: string;
+  days: number;
+  busy_minutes: number;
+  average_busy_minutes: number;
+}
+
+export interface CalendarUsage {
+  calendar_id: string;
+  calendar_title: string;
+  events: number;
+  minutes: number;
+}
+
+export interface TitleUsage {
+  title: string;
+  events: number;
+  minutes: number;
+}
+
+export interface CalendarStats {
+  range_start: number;
+  range_end: number;
+  events: number;
+  timed_events: number;
+  busy_minutes: number;
+  busy_minutes_in_working_hours: number;
+  busy_minutes_outside_working_hours: number;
+  average_event_minutes: number;
+  busiest_day: DayStats | null;
+  days: DayStats[];
+  by_weekday: WeekdayStats[];
+  by_calendar: CalendarUsage[];
+  top_titles: TitleUsage[];
+}
+
 export interface DuplicateGroup {
   title: string;
   start: number;

@@ -20,6 +20,7 @@ READ_TOOLS = {
     "agenda",
     "find_conflicts",
     "find_duplicates",
+    "calendar_stats",
     "export_ics",
 }
 WRITE_TOOLS = {
@@ -175,3 +176,11 @@ async def test_find_duplicates(service: CalendarService) -> None:
     (group,) = r["groups"]
     assert group["start"] == "2026-11-04T15:00:00+03:00" and group["repeats"] == 1
     assert [e["calendar_title"] for e in group["events"]] == ["Home", "Work"]
+
+
+async def test_calendar_stats(service: CalendarService) -> None:
+    service.create_event("Lecture", "2026-11-02T10:00", end="2026-11-02T12:00")
+    async with Client(build_server(service)) as client:
+        r = await call(client, "calendar_stats", {"start": "2026-11-02", "end": "2026-11-08"})
+    assert r["busy_minutes"] == 120 and r["busiest_day"]["date"] == "2026-11-02"
+    assert r["days"][0]["weekday"] == "Monday" and len(r["days"]) == 7

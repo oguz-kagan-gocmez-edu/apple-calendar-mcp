@@ -335,6 +335,29 @@ export function buildServer(service: CalendarService, opts: { readOnly?: boolean
   );
 
   mcp.registerTool(
+    "calendar_stats",
+    {
+      description:
+        "Where the time goes: busy time per day, weekday, calendar and title, in and out of hours.\n\n" +
+        'Use for "how busy was my month?", "how much time do I spend in meetings?" or "which day is\n' +
+        "the heaviest?\". Busy time skips all-day events, events marked 'free' and declined invitations.",
+      annotations: READ,
+      inputSchema: z.object({
+        start: z.string().describe("Range start, e.g. '2026-11-01'."),
+        end: z.string().describe("Range end. A bare date is inclusive (whole day)."),
+        calendar_ids: calendarIds,
+        working_hours_start: z.string().default("09:00").describe("'HH:MM'."),
+        working_hours_end: z.string().default("18:00").describe("'HH:MM'."),
+      }),
+    },
+    (a) =>
+      guard(async () => {
+        const r = await service.calendarStats(a);
+        return { timezone: zone.name, ...r, range_start: zone.iso(r.range_start), range_end: zone.iso(r.range_end) };
+      }),
+  );
+
+  mcp.registerTool(
     "find_duplicates",
     {
       description:

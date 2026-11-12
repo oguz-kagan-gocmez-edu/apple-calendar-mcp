@@ -8,8 +8,11 @@ import type {
   Agenda,
   Availability,
   Calendar,
+  CalendarStats,
+  CalendarUsage,
   Conflict,
   ConflictResult,
+  DayStats,
   DeleteResult,
   DuplicateResult,
   Event,
@@ -23,6 +26,8 @@ import type {
   Reply,
   SkippedItem,
   Span,
+  TitleUsage,
+  WeekdayStats,
 } from "./models";
 import {
   type ChangeJournal,
@@ -38,6 +43,7 @@ import { type IcsEvent, exportIcs, parseIcs } from "./ics";
 import { eventRef, patchIsEmpty } from "./models";
 import {
   type ConflictPair,
+  blocksTime,
   busyTime,
   duplicateKey,
   findConflicts,
@@ -66,6 +72,7 @@ import {
   dayNumber,
   isDateOnly,
   isoWeek,
+  overlaps,
   parseClock,
   parseDate,
   parseDateTime,
@@ -448,6 +455,96 @@ export class CalendarService {
       free_time: free,
       conflicts: findConflicts(timed).map(conflict),
       invitations: events.filter((ev) => ev.my_status === "pending").map(eventRef),
+    };
+  }
+
+  /** Where the time goes in a range: busy time per day, weekday, calendar and title. */
+  async calendarStats(input: {
+    start: string;
+    end: string;
+    calendar_ids?: string[] | null;
+    working_hours_start?: string;
+    working_hours_end?: string;
+  }): Promise<CalendarStats> {
+    const [s, e] = this.range(input.start, input.end);
+    const [dayStart, dayEnd] = CalendarService.workingHours(input.working_hours_start, input.working_hours_end);
+    const events = (await this.store.listEvents(s, e, input.calendar_ids?.length ? input.calendar_ids : null))
+      .filter((ev) => ev.status !== "canceled")
+      .sort(byStartThenTitle);
+    const timed = events.filter((ev) => !ev.all_day);
+    const taking = timed.filter((ev) => blocksTime(ev, true) && ev.end > ev.start);
+    const minutes = (ms: number) => Math.floor(ms / MINUTE);
+    const clipped = (ev: Event) => Math.max(Math.min(ev.end, e) - Math.max(ev.start, s), 0);
+
+    const days: DayStats[] = [];
+    let inHours = 0;
+    for (let d = this.zone.date(s); this.zone.startOfDay(d) < e; d = addDays(d, 1)) {
+      const ds = Math.max(this.zone.startOfDay(d), s);
+      const de = Math.min(this.zone.startOfDay(addDays(d, 1)), e);
+      days.push({
+        date: formatDate(d),
+        weekday: this.zone.weekdayName(this.zone.startOfDay(d)),
+        events: events.filter((ev) => overlaps(ev.start, ev.end, ds, de)).length,
+        busy_minutes: minutes(busyTime(timed, [ds, de])),
+      });
+      const ws = Math.max(this.zone.instant(at(d, dayStart)), s);
+      const we = Math.min(this.zone.instant(at(dayEnd > dayStart ? d : addDays(d, 1), dayEnd)), e);
+      if (ws < we) inHours += busyTime(timed, [ws, we]);
+    }
+
+    const weekdays: WeekdayStats[] = [];
+    for (const name of ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]) {
+      const same = days.filter((x) => x.weekday === name);
+      if (!same.length) continue;
+      const total = same.reduce((sum, x) => sum + x.busy_minutes, 0);
+      weekdays.push({ weekday: name, days: same.length, busy_minutes: total, average_busy_minutes: Math.floor(total / same.length) });
+    }
+
+    const perCal = new Map<string, CalendarUsage>();
+    for (const ev of events) {
+      let use = perCal.get(ev.calendar_id);
+      if (!use) {
+        use = { calendar_id: ev.calendar_id, calendar_title: ev.calendar_title, events: 0, minutes: 0 };
+        perCal.set(ev.calendar_id, use);
+      }
+      use.events += 1;
+    }
+    for (const ev of taking) perCal.get(ev.calendar_id)!.minutes += minutes(clipped(ev));
+
+    const perTitle = new Map<string, TitleUsage>();
+    for (const ev of taking) {
+      const key = ev.title.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+      let row = perTitle.get(key);
+      if (!row) {
+        row = { title: ev.title, events: 0, minutes: 0 };
+        perTitle.set(key, row);
+      }
+      row.events += 1;
+      row.minutes += minutes(clipped(ev));
+    }
+    const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+    const busy = days.reduce((sum, x) => sum + x.busy_minutes, 0);
+    const busiest = days.reduce<DayStats | null>((best, x) => (!best || x.busy_minutes > best.busy_minutes ? x : best), null);
+    const totalTaking = taking.reduce((sum, ev) => sum + (ev.end - ev.start), 0);
+    return {
+      range_start: s,
+      range_end: e,
+      events: events.length,
+      timed_events: timed.length,
+      busy_minutes: busy,
+      busy_minutes_in_working_hours: minutes(inHours),
+      busy_minutes_outside_working_hours: busy - minutes(inHours),
+      average_event_minutes: taking.length ? Math.floor(minutes(totalTaking) / taking.length) : 0,
+      busiest_day: busiest && busiest.busy_minutes ? busiest : null,
+      days,
+      by_weekday: weekdays,
+      by_calendar: [...perCal.values()].sort(
+        (a, b) => b.minutes - a.minutes || b.events - a.events || cmp(a.calendar_title, b.calendar_title),
+      ),
+      top_titles: [...perTitle.values()]
+        .sort((a, b) => b.minutes - a.minutes || b.events - a.events || cmp(a.title, b.title))
+        .slice(0, 10),
     };
   }
 
