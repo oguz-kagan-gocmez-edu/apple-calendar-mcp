@@ -18,6 +18,10 @@ export interface Env {
   CALDAV_URL?: string;
   CALDAV_DEFAULT_CALENDAR?: string;
   READ_ONLY?: string;
+  /** Per-calendar access: comma-separated calendar ids or titles. */
+  READ_ONLY_CALENDARS?: string;
+  HIDDEN_CALENDARS?: string;
+  ONLY_CALENDARS?: string;
   /** Extra OAuth redirect URIs, comma-separated. */
   OAUTH_ALLOWED_REDIRECTS?: string;
   /** "memory" for tests and demos; anything else means CalDAV. */

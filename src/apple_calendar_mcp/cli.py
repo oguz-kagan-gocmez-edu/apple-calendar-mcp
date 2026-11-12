@@ -2,6 +2,8 @@
 
     apple-calendar-mcp                 # serve over stdio with EventKit (macOS)
     apple-calendar-mcp --read-only     # expose only the read tools
+    apple-calendar-mcp --hidden-calendars Family --read-only-calendars Work
+                                       # per-calendar access (ids or titles)
     apple-calendar-mcp --backend memory --demo   # fake data, any OS
     apple-calendar-mcp doctor          # check/prompt calendar permission
     apple-calendar-mcp install-app     # build the helper app that owns the permission (macOS)
@@ -21,6 +23,7 @@ from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 
 from . import __version__, macos_app
+from .access import AccessControlledStore, AccessPolicy
 from .memory_store import MemoryStore, seed_demo
 from .server import build_server
 from .service import CalendarService
@@ -55,7 +58,24 @@ def caldav_store_from_env(tz: tzinfo) -> CalendarStore:
     )
 
 
-def _make_store(backend: str, tz_override: str | None, demo: bool) -> tuple[CalendarStore, CalendarService]:
+ACCESS_ENV = {
+    "read_only_calendars": "APPLE_CALENDAR_READ_ONLY_CALENDARS",
+    "hidden_calendars": "APPLE_CALENDAR_HIDDEN_CALENDARS",
+    "only_calendars": "APPLE_CALENDAR_ONLY_CALENDARS",
+}
+
+
+def access_policy(args: argparse.Namespace) -> AccessPolicy:
+    """Per-calendar access from the command line, falling back to the environment."""
+    value = {k: getattr(args, k, None) or os.environ.get(env, "") for k, env in ACCESS_ENV.items()}
+    return AccessPolicy.parse(
+        value["read_only_calendars"], value["hidden_calendars"], value["only_calendars"]
+    )
+
+
+def _make_store(
+    backend: str, tz_override: str | None, demo: bool, policy: AccessPolicy | None = None
+) -> tuple[CalendarStore, CalendarService]:
     tz = resolve_local_tz(tz_override)
     store: CalendarStore
     if backend == "caldav":
@@ -73,24 +93,31 @@ def _make_store(backend: str, tz_override: str | None, demo: bool) -> tuple[Cale
         from .eventkit_store import EventKitStore
 
         store = EventKitStore(tz)
+    if policy is not None and not policy.is_open:
+        store = AccessControlledStore(store, policy)
     return store, CalendarService(store, tz)
 
 
-def _print_calendars(store: CalendarStore, tz: tzinfo) -> None:
+def _print_calendars(store: CalendarStore, tz: tzinfo, policy: AccessPolicy) -> None:
     cals = store.list_calendars()
     print(f"calendars          : {len(cals)}")
     for c in cals:
-        flag = "rw" if c.writable else "ro"
+        level = policy.level(c)
+        flag = "hidden" if level == "hidden" else "ro" if level == "read" or not c.writable else "rw"
         print(f"  [{flag}] {c.title}  ({c.source})  id={c.id}{'  (default)' if c.is_default else ''}")
+    for name in policy.unmatched(cals):
+        print(f"WARNING: access setting {name!r} matches no calendar id or title")
+    if not policy.is_open:
+        store = AccessControlledStore(store, policy)
     now = datetime.now(tz)
     print(f"events next 7 days : {len(store.list_events(now, now + timedelta(days=7)))}")
 
 
-def _doctor_caldav(tz: tzinfo) -> int:
+def _doctor_caldav(tz: tzinfo, policy: AccessPolicy) -> int:
     store = caldav_store_from_env(tz)
     print(f"backend            : CalDAV ({os.environ.get('CALDAV_URL') or 'iCloud'})")
     try:
-        _print_calendars(store, tz)
+        _print_calendars(store, tz, policy)
     except CalendarError as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -101,8 +128,9 @@ def _doctor(args: argparse.Namespace) -> int:
     print(f"apple-calendar-mcp {__version__}")
     tz = resolve_local_tz(args.timezone)
     print(f"time zone          : {tz_name(tz)}")
+    policy = access_policy(args)
     if args.backend == "caldav":
-        return _doctor_caldav(tz)
+        return _doctor_caldav(tz, policy)
     if sys.platform != "darwin":
         print("platform           : not macOS -> only '--backend memory' is available")
         return 1
@@ -124,7 +152,7 @@ def _doctor(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}")
         return 1
     print(f"permission (after) : {EventKitStore.authorization_status()}")
-    _print_calendars(store, tz)
+    _print_calendars(store, tz, policy)
     if not os.environ.get(macos_app.VIA_APP_ENV):
         print(
             "\nNote: macOS grants calendar access per *host app*. This check used the app\n"
@@ -158,6 +186,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--demo", action="store_true", help="seed the memory backend with sample events")
     parser.add_argument("--read-only", action="store_true", help="do not expose create/update/delete")
+    for flag, env in ACCESS_ENV.items():
+        what = {
+            "read_only_calendars": "calendars Claude may read but not change",
+            "hidden_calendars": "calendars Claude can't see at all",
+            "only_calendars": "show only these calendars; hide the rest",
+        }[flag]
+        parser.add_argument(
+            "--" + flag.replace("_", "-"),
+            metavar="NAMES",
+            help=f"{what}: comma-separated ids or titles (default: ${env})",
+        )
     parser.add_argument("--timezone", help="IANA zone, e.g. Europe/Istanbul (default: system)")
     parser.add_argument("--log-level", default="WARNING")
     parser.add_argument(
@@ -194,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve-http":
         return _serve_http(args)
 
-    _, service = _make_store(args.backend, args.timezone, args.demo)
+    _, service = _make_store(args.backend, args.timezone, args.demo, access_policy(args))
     log.info("serving backend=%s tz=%s read_only=%s", args.backend, tz_name(service.tz), args.read_only)
     build_server(service, read_only=args.read_only).run("stdio")
     return 0
@@ -206,7 +245,7 @@ def _serve_http(args: argparse.Namespace) -> int:
     if args.backend == "eventkit":
         raise SystemExit("serve-http runs on a server, so it uses --backend caldav (or memory for testing).")
     config = remote.RemoteConfig.from_env(host=args.host, port=args.port)
-    _, service = _make_store(args.backend, args.timezone, args.demo)
+    _, service = _make_store(args.backend, args.timezone, args.demo, access_policy(args))
     remote.serve(service, config, read_only=args.read_only)
     return 0
 
