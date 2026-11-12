@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#readme",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "apple-calendar-eventkit-mcp",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       }

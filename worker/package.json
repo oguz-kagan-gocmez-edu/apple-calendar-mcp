@@ -1,6 +1,6 @@
 {
   "name": "apple-calendar-mcp-worker",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Apple Calendar (iCloud) MCP connector for claude.ai, on Cloudflare Workers' free plan.",
   "license": "MIT",
