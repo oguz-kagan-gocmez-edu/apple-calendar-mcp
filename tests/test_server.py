@@ -20,7 +20,7 @@ READ_TOOLS = {
     "agenda",
     "find_conflicts",
 }
-WRITE_TOOLS = {"create_event", "update_event", "delete_event"}
+WRITE_TOOLS = {"create_event", "update_event", "delete_event", "apply_changes", "undo_change", "list_changes"}
 
 
 async def call(client: Client, name: str, args: dict[str, Any] | None = None) -> Any:
@@ -35,7 +35,7 @@ async def test_tool_catalogue_and_annotations(service: CalendarService) -> None:
     async with Client(build_server(service)) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == READ_TOOLS | WRITE_TOOLS
-    for name in READ_TOOLS:
+    for name in READ_TOOLS | {"list_changes"}:
         assert tools[name].annotations is not None and tools[name].annotations.read_only_hint
     assert tools["delete_event"].annotations is not None
     assert tools["delete_event"].annotations.destructive_hint
@@ -129,3 +129,26 @@ async def test_agenda_and_conflicts(service: CalendarService) -> None:
             {"start": "2026-11-02", "end": "2026-11-02", "duration_minutes": 60, "buffer_minutes": 30},
         )
         assert slots["slots"][0]["start"] == "2026-11-02T13:00:00+03:00"
+
+
+async def test_batch_and_undo(service: CalendarService) -> None:
+    async with Client(build_server(service)) as client:
+        r = await call(
+            client,
+            "apply_changes",
+            {
+                "changes": [
+                    {"action": "create", "title": "A", "start": "2026-11-03T09:00"},
+                    {"action": "create", "title": "B", "start": "2026-11-03T11:00"},
+                ]
+            },
+        )
+        assert [o["event"]["title"] for o in r["results"]] == ["A", "B"]
+        changes = await call(client, "list_changes")
+        assert changes[0]["change_id"] == r["change_id"] and changes[0]["can_undo"]
+        undone = await call(client, "undo_change", {})
+        assert len(undone["removed_ids"]) == 2
+        listed = await call(client, "list_events", {"start": "2026-11-03", "end": "2026-11-03"})
+        assert listed["count"] == 0
+        res = await client.call_tool("apply_changes", {"changes": [{"action": "explode"}]})
+        assert res.is_error

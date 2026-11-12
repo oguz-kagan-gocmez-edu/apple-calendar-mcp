@@ -219,27 +219,30 @@ class CaldavStore:
         if "RRULE" not in master:
             return None
         rule = master["RRULE"]
-        freq = str((rule.get("FREQ") or [""])[0]).lower()
+
+        def first(key: str, default: Any = None) -> Any:
+            # Parsed rules hold lists; a rule built in this process holds plain values.
+            v = rule.get(key)
+            return (v[0] if v else default) if isinstance(v, list) else (default if v is None else v)
+
+        freq = str(first("FREQ", "")).lower()
         if freq not in ("daily", "weekly", "monthly", "yearly"):
             return None
         days = None
         if freq == "weekly" and rule.get("BYDAY"):
+            byday = rule["BYDAY"] if isinstance(rule["BYDAY"], list) else [rule["BYDAY"]]
             days = sorted(
-                {
-                    WEEKDAYS[_BYDAY.index(str(d)[-2:].upper())]
-                    for d in rule["BYDAY"]
-                    if str(d)[-2:].upper() in _BYDAY
-                },
+                {WEEKDAYS[_BYDAY.index(str(d)[-2:].upper())] for d in byday if str(d)[-2:].upper() in _BYDAY},
                 key=WEEKDAYS.index,
             )
         until = None
-        if rule.get("UNTIL"):
-            until = self._local(rule["UNTIL"][0]).date()
-        count = int(rule["COUNT"][0]) if rule.get("COUNT") else None
+        if first("UNTIL") is not None:
+            until = self._local(first("UNTIL")).date()
+        count = int(first("COUNT")) if first("COUNT") is not None else None
         try:
             return Recurrence(
                 frequency=freq,
-                interval=int((rule.get("INTERVAL") or [1])[0]),
+                interval=int(first("INTERVAL", 1)),
                 days_of_week=days or None,
                 count=count,
                 until=None if count else until,

@@ -18,12 +18,19 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from .changes import ChangeJournal, ChangeRecord, Step, check_unchanged, revert
 from .models import (
     Agenda,
     Availability,
+    BatchChange,
+    BatchResult,
     Calendar,
+    ChangeInfo,
+    ChangeOutcome,
     Conflict,
     ConflictResult,
+    CreateChange,
+    DeleteChange,
     DeleteResult,
     Event,
     EventDraft,
@@ -34,9 +41,10 @@ from .models import (
     Recurrence,
     Span,
     TimeContext,
+    UndoResult,
 )
 from .scheduling import busy_time, find_conflicts, find_free_slots
-from .store import CalendarStore, InvalidRequestError
+from .store import CalendarError, CalendarStore, InvalidRequestError
 from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
 
 MAX_RANGE = timedelta(days=366)
@@ -45,6 +53,7 @@ MAX_BUFFER_MINUTES = 240
 MAX_AGENDA_DAYS = 14
 ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
 DEFAULT_DURATION = timedelta(hours=1)
+MAX_BATCH = 25
 
 
 def _conflict(pair: tuple[Event, Event, datetime, datetime]) -> Conflict:
@@ -79,6 +88,7 @@ class CalendarService:
         self.store = store
         self.tz = tz
         self._clock = clock or (lambda: datetime.now(tz))
+        self.journal = ChangeJournal()
 
     # ------------------------------------------------------------ helpers
     def now(self) -> datetime:
@@ -330,6 +340,39 @@ class CalendarService:
         recurrence: Recurrence | None = None,
         availability: Availability | None = None,
     ) -> Event:
+        draft = self._create_draft(
+            title,
+            start,
+            end,
+            duration_minutes,
+            all_day,
+            calendar_id,
+            location,
+            notes,
+            url,
+            alarms_minutes_before,
+            recurrence,
+            availability,
+        )
+        created = self.store.create_event(draft)
+        self._record([Step("create", None, created)])
+        return created
+
+    def _create_draft(
+        self,
+        title: str,
+        start: str,
+        end: str | None = None,
+        duration_minutes: int | None = None,
+        all_day: bool = False,
+        calendar_id: str | None = None,
+        location: str | None = None,
+        notes: str | None = None,
+        url: str | None = None,
+        alarms_minutes_before: list[int] | None = None,
+        recurrence: Recurrence | None = None,
+        availability: Availability | None = None,
+    ) -> EventDraft:
         title = title.strip()
         if not title:
             raise InvalidRequestError("title must not be empty.")
@@ -368,7 +411,7 @@ class CalendarService:
                 recurrence=recurrence,
                 availability=availability,
             )
-        return self.store.create_event(draft)
+        return draft
 
     def update_event(
         self,
@@ -388,6 +431,43 @@ class CalendarService:
         availability: Availability | None = None,
     ) -> Event:
         current = self.store.get_event(event_id)
+        patch, span = self._update_patch(
+            current,
+            span,
+            title,
+            start,
+            end,
+            all_day,
+            calendar_id,
+            location,
+            notes,
+            url,
+            alarms_minutes_before,
+            recurrence,
+            remove_recurrence,
+            availability,
+        )
+        updated = self.store.update_event(event_id, patch, span)
+        self._record([Step("update", current, updated, span)])
+        return updated
+
+    def _update_patch(
+        self,
+        current: Event,
+        span: Span = Span.THIS,
+        title: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        all_day: bool | None = None,
+        calendar_id: str | None = None,
+        location: str | None = None,
+        notes: str | None = None,
+        url: str | None = None,
+        alarms_minutes_before: list[int] | None = None,
+        recurrence: Recurrence | None = None,
+        remove_recurrence: bool = False,
+        availability: Availability | None = None,
+    ) -> tuple[EventPatch, Span]:
         if not current.is_recurring:
             span = Span.THIS  # spans only mean something for series
         if recurrence is not None and remove_recurrence:
@@ -418,7 +498,7 @@ class CalendarService:
             )
         if patch.is_empty():
             raise InvalidRequestError("Nothing to update: pass at least one field to change.")
-        return self.store.update_event(event_id, patch, span)
+        return patch, span
 
     def _resolve_times(
         self, current: Event, start: str | None, end: str | None, all_day: bool | None
@@ -459,9 +539,105 @@ class CalendarService:
 
     def delete_event(self, event_id: str, span: Span = Span.THIS) -> DeleteResult:
         before = self.store.delete_event(event_id, span)
+        span = span if before.is_recurring else Span.THIS
+        self._record([Step("delete", before, None, span)])
         return DeleteResult(
             deleted=True,
             event_id=event_id,
-            span=span if before.is_recurring else Span.THIS,
+            span=span,
             title=before.title,
         )
+
+    # ------------------------------------------------------------ change log
+    def _record(self, steps: list[Step]) -> ChangeRecord:
+        return self.journal.record(steps, self.now().replace(microsecond=0))
+
+    def list_changes(self) -> list[ChangeInfo]:
+        return [
+            ChangeInfo(
+                change_id=r.id, at=r.at, summary=r.summary, can_undo=r.blocker is None, why_not=r.blocker
+            )
+            for r in self.journal.recent()
+        ]
+
+    def undo_change(self, change_id: str | None = None) -> UndoResult:
+        rec = self.journal.get(change_id)
+        if rec.blocker:
+            raise InvalidRequestError(f"Can't undo {rec.summary}: {rec.blocker}")
+        for step in rec.steps:  # check everything before touching anything
+            check_unchanged(self.store, step)
+        restored: list[Event] = []
+        removed: list[str] = []
+        for step in reversed(rec.steps):
+            event, gone = revert(self.store, step)
+            if event is not None:
+                restored.append(event)
+            if gone is not None:
+                removed.append(gone)
+        self.journal.remove(rec.id)
+        return UndoResult(change_id=rec.id, summary=rec.summary, restored=restored[::-1], removed_ids=removed)
+
+    def apply_changes(self, changes: list[BatchChange]) -> BatchResult:
+        """Apply creates, updates and deletes all-or-nothing, as one undoable change."""
+        if not 1 <= len(changes) <= MAX_BATCH:
+            raise InvalidRequestError(f"Pass between 1 and {MAX_BATCH} changes.")
+        ids = [c.event_id for c in changes if not isinstance(c, CreateChange)]
+        if len(ids) != len(set(ids)):
+            raise InvalidRequestError("Each event may appear only once in a batch.")
+
+        # 1. Validate everything (and read current state) before writing anything.
+        plan: list[tuple[BatchChange, Event | None, EventDraft | EventPatch | None]] = []
+        for n, c in enumerate(changes, 1):
+            try:
+                if isinstance(c, CreateChange):
+                    args = c.model_dump(exclude={"action"})
+                    plan.append((c, None, self._create_draft(**args)))
+                    continue
+                current = self.store.get_event(c.event_id)
+                if isinstance(c, DeleteChange):
+                    blocker = Step("delete", current, None).blocker
+                    if blocker:
+                        raise InvalidRequestError(f"{blocker} Delete it on its own with delete_event.")
+                    plan.append((c, current, None))
+                else:
+                    args = c.model_dump(exclude={"action", "event_id"})
+                    patch, _ = self._update_patch(current, Span.THIS, **args)
+                    plan.append((c, current, patch))
+            except CalendarError as exc:
+                raise type(exc)(f"Change {n} ({c.action}): {exc} Nothing was changed.") from exc
+
+        # 2. Apply in order; on failure, roll back what was done.
+        steps: list[Step] = []
+        for n, (c, before, payload) in enumerate(plan, 1):
+            try:
+                if isinstance(c, CreateChange):
+                    assert isinstance(payload, EventDraft)
+                    steps.append(Step("create", None, self.store.create_event(payload)))
+                elif isinstance(c, DeleteChange):
+                    steps.append(Step("delete", self.store.delete_event(c.event_id, Span.THIS), None))
+                else:
+                    assert isinstance(payload, EventPatch) and before is not None
+                    steps.append(
+                        Step("update", before, self.store.update_event(c.event_id, payload, Span.THIS))
+                    )
+            except CalendarError as exc:
+                failed = self._rollback(steps)
+                note = (
+                    "The earlier changes were rolled back."
+                    if not failed
+                    else (f"Rolling back the earlier changes also failed for: {', '.join(failed)}.")
+                )
+                raise type(exc)(f"Change {n} ({c.action}): {exc} {note}") from exc
+
+        rec = self._record(steps)
+        outcomes = [ChangeOutcome(action=s.action, event=s.event) for s in steps]
+        return BatchResult(change_id=rec.id, results=outcomes)
+
+    def _rollback(self, steps: list[Step]) -> list[str]:
+        failed: list[str] = []
+        for step in reversed(steps):
+            try:
+                revert(self.store, step)
+            except CalendarError:
+                failed.append(f'"{step.title}"')
+        return failed

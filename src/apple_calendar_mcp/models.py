@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -194,6 +194,31 @@ class DeleteResult(_Model):
     title: str
 
 
+class ChangeInfo(_Model):
+    change_id: str
+    at: datetime
+    summary: str
+    can_undo: bool
+    why_not: str | None = Field(None, description="Why this change can't be undone, if it can't.")
+
+
+class UndoResult(_Model):
+    change_id: str
+    summary: str = Field(description="The change that was undone.")
+    restored: list[Event] = Field(description="Events as they are again (re-created ones have new ids).")
+    removed_ids: list[str] = Field(description="Events the undo deleted (ones the change had created).")
+
+
+class ChangeOutcome(_Model):
+    action: Literal["create", "update", "delete"]
+    event: Event = Field(description="The event after the change (for delete: as it was).")
+
+
+class BatchResult(_Model):
+    change_id: str = Field(description="Pass to undo_change to undo the whole batch.")
+    results: list[ChangeOutcome]
+
+
 class TimeContext(_Model):
     now: datetime
     timezone: str
@@ -244,3 +269,47 @@ class EventPatch(_Model):
 
     def touches_recurrence(self) -> bool:
         return self.recurrence is not None or self.remove_recurrence
+
+
+# ---------------------------------------------------------------- batch input
+class CreateChange(_Model):
+    action: Literal["create"]
+    title: str
+    start: str = Field(description="Start time, or the date for all-day events.")
+    end: str | None = Field(None, description="End time; all-day: last day (inclusive).")
+    duration_minutes: int | None = Field(None, description="Alternative to end.")
+    all_day: bool = False
+    calendar_id: str | None = None
+    location: str | None = None
+    notes: str | None = None
+    url: str | None = None
+    alarms_minutes_before: list[int] | None = None
+    recurrence: Recurrence | None = None
+    availability: Availability | None = None
+
+
+class UpdateChange(_Model):
+    """Edits one event, or one occurrence of a series (span 'this')."""
+
+    action: Literal["update"]
+    event_id: str
+    title: str | None = None
+    start: str | None = Field(None, description="New start; end moves too, keeping the duration.")
+    end: str | None = None
+    all_day: bool | None = None
+    calendar_id: str | None = None
+    location: str | None = Field(None, description="Omit to keep; '' clears.")
+    notes: str | None = Field(None, description="Omit to keep; '' clears.")
+    url: str | None = Field(None, description="Omit to keep; '' clears.")
+    alarms_minutes_before: list[int] | None = None
+    availability: Availability | None = None
+
+
+class DeleteChange(_Model):
+    """Deletes a one-off event without attendees (so the batch can be undone)."""
+
+    action: Literal["delete"]
+    event_id: str
+
+
+BatchChange = Annotated[CreateChange | UpdateChange | DeleteChange, Field(discriminator="action")]

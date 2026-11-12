@@ -39,12 +39,16 @@ Claude: ▸ agenda
 | `create_event` | Timed or all-day events, with alarms, URL and repeat rules | write |
 | `update_event` | Partial edits. Recurring events take `span`: `this`, `future` or `all` | write |
 | `delete_event` | Delete one occurrence, this and later ones, or the whole series | destructive |
+| `apply_changes` | Up to 25 creates, updates and deletes in one go, all-or-nothing: everything is checked first, and a failure part-way rolls back the rest | destructive |
+| `undo_change` | Undo the latest change (or one picked from `list_changes`), including a whole batch | destructive |
+| `list_changes` | Recent changes made through the server, and whether each can be undone | read |
 
 Other parts of the design:
 
 - **Free/busy that matches reality.** Free time, busy minutes and conflicts ignore all-day events, events marked *free*, canceled events and invitations you declined. Invitations you haven't answered still count as busy, and `agenda` lists them separately.
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
 - **`--read-only` mode.** Runs the server without the write tools at all.
+- **Undo that won't clobber anything.** Every write is logged with the event before and after. Undo restores it exactly, or refuses: if the event was edited again since, or if the change can't be reversed exactly (edits to several occurrences of a repeating event, a deleted occurrence, a deleted invitation whose invites can't be resent). The log keeps the last 50 changes, in memory on your Mac.
 - **Per-calendar access.** Mark calendars read-only, or hide them from Claude entirely. See [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch).
 - **Prompt-injection hygiene.** The server tells the model that event text is untrusted data. Anyone who sends you an invite controls that text.
 - **Typed output.** Every tool returns JSON with a published output schema, generated from pydantic models.
@@ -317,6 +321,7 @@ In claude.ai: **Settings → Connectors → Add custom connector**. Enter your c
 - Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
 - The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
 - `--read-only` works here too, if you want Claude on the web to only read your calendar (on Workers: `"READ_ONLY": "1"` in `wrangler.jsonc`).
+- Undo works here too. On Cloudflare Workers the change log is kept in Workers KV (each request starts fresh), so the before and after copies of changed events stay there for 24 hours, then expire.
 - Per-calendar access works here too: set the `APPLE_CALENDAR_*_CALENDARS` variables (see [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch)). On Workers they are `READ_ONLY_CALENDARS`, `HIDDEN_CALENDARS` and `ONLY_CALENDARS` in `wrangler.jsonc`.
 - On Cloudflare Workers, OAuth is handled by Cloudflare's [`workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): tokens are stored hashed in Workers KV and props are encrypted with the token. The same rules apply (Claude-only redirect URIs, 1 hour access tokens, 30 day rotating refresh tokens, lockout), with two differences: an old refresh token keeps working until its replacement is first used, and the lockout counter lives in KV, which is eventually consistent, so the limit is approximate.
 
@@ -345,7 +350,7 @@ The test suite has six layers:
 | Layer | File | What it covers |
 |---|---|---|
 | Unit | `test_timeutil_recurrence.py`, `test_scheduling.py` | ISO parsing, DST-safe recurrence expansion, interval merging and free slots |
-| Service | `test_service.py` | Create, update and delete validation, `this` / `future` / `all` semantics on recurring series, agenda, conflicts and buffered free time; `test_access.py` covers per-calendar read-only and hidden calendars through every tool |
+| Service | `test_service.py` | Create, update and delete validation, `this` / `future` / `all` semantics on recurring series, agenda, conflicts and buffered free time; `test_access.py` covers per-calendar read-only and hidden calendars through every tool; `test_changes.py` covers undo and batches, and also runs against CalDAV |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py`, `test_caldav_store.py` | EventKit on a fake PyObjC layer. CalDAV against a real Radicale server, re-running every service scenario plus iCalendar mapping (overrides, EXDATE, all-day, alarms, RRULE) |
 | Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |
