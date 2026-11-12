@@ -40,7 +40,7 @@ class FakeEventKitStore:
             )
         ]
 
-    def list_events(self, start: datetime, end: datetime) -> list[Any]:
+    def list_events(self, start: datetime, end: datetime, calendar_ids: list[str] | None = None) -> list[Any]:
         return []
 
 
@@ -257,3 +257,38 @@ def test_serve_http_starts_remote_server(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert seen["config"].port == 9123
     assert seen["read_only"] is True
     assert isinstance(seen["store"], MemoryStore)
+
+
+def test_access_settings_from_flags_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from apple_calendar_mcp.access import AccessControlledStore
+
+    monkeypatch.setenv("APPLE_CALENDAR_HIDDEN_CALENDARS", "holidays")
+    calls: dict[str, Any] = {}
+
+    def fake_build(service: Any, read_only: bool = False) -> Any:
+        calls["service"] = service
+        return types.SimpleNamespace(run=lambda transport: None)
+
+    monkeypatch.setattr(cli, "build_server", fake_build)
+    assert cli.main(["--backend", "memory", "--read-only-calendars", "Work", "--timezone", "UTC"]) == 0
+    store = calls["service"].store
+    assert isinstance(store, AccessControlledStore)
+    assert {c.id: c.writable for c in store.list_calendars()} == {"home": True, "work": False}
+
+
+def test_no_access_settings_means_no_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    for env in cli.ACCESS_ENV.values():
+        monkeypatch.delenv(env, raising=False)
+    store, _ = cli._make_store("memory", "UTC", False, cli.access_policy(cli.argparse.Namespace()))
+    assert isinstance(store, MemoryStore)
+
+
+def test_doctor_shows_access_and_typos(
+    fake_eventkit: type[FakeEventKitStore], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["doctor", "--timezone", "UTC", "--read-only-calendars", "work,Wrok"]) == 0
+    out = capsys.readouterr().out
+    assert "[ro] Work  (iCloud)" in out
+    assert "WARNING: access setting 'wrok' matches no calendar" in out
+    assert cli.main(["doctor", "--timezone", "UTC", "--hidden-calendars", "cal-1"]) == 0
+    assert "[hidden] Work" in capsys.readouterr().out

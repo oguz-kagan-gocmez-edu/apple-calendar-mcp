@@ -45,6 +45,7 @@ Other parts of the design:
 - **Free/busy that matches reality.** Free time, busy minutes and conflicts ignore all-day events, events marked *free*, canceled events and invitations you declined. Invitations you haven't answered still count as busy, and `agenda` lists them separately.
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
 - **`--read-only` mode.** Runs the server without the write tools at all.
+- **Per-calendar access.** Mark calendars read-only, or hide them from Claude entirely. See [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch).
 - **Prompt-injection hygiene.** The server tells the model that event text is untrusted data. Anyone who sends you an invite controls that text.
 - **Typed output.** Every tool returns JSON with a published output schema, generated from pydantic models.
 
@@ -174,6 +175,24 @@ apple-calendar-mcp --backend caldav doctor     # iCloud over CalDAV (CALDAV_* en
 apple-calendar-mcp serve-http [--host H] [--port P]   # remote connector, see below
 ```
 
+### Choosing which calendars Claude can touch
+
+Three options, each a comma-separated list of calendar ids or titles (`doctor` prints both):
+
+| Option | Environment variable | Effect |
+|---|---|---|
+| `--read-only-calendars` | `APPLE_CALENDAR_READ_ONLY_CALENDARS` | Claude can read these but can't create, change, move or delete anything in them |
+| `--hidden-calendars` | `APPLE_CALENDAR_HIDDEN_CALENDARS` | Claude can't see these at all: not in `list_calendars`, no events, ids act as if they don't exist, and their time counts as free |
+| `--only-calendars` | `APPLE_CALENDAR_ONLY_CALENDARS` | Shows only these; every other calendar is hidden |
+
+Titles are matched case-insensitively and match every calendar with that title, so use the id when two accounts have a calendar with the same name. If a calendar is in both lists, hidden wins. For example, in Claude Desktop's config:
+
+```json
+"args": ["--read-only-calendars", "Work", "--hidden-calendars", "Family,Therapy"]
+```
+
+`doctor` shows each calendar as `[rw]`, `[ro]` or `[hidden]` with your settings applied, and warns about names that match nothing (usually a typo). The checks run in front of the backend, so every tool goes through them.
+
 ## macOS permissions (read this if nothing works)
 
 macOS protects calendars with TCC (Transparency, Consent and Control). It asks on behalf of the **responsible app**: normally the GUI app that started the process. Since macOS 14 that app must declare `NSCalendarsFullAccessUsageDescription` in its Info.plist, or the request is **refused without any prompt**. Terminal and Claude don't declare it, so running the server directly fails with *"macOS refused calendar access without showing a prompt"*.
@@ -298,6 +317,7 @@ In claude.ai: **Settings → Connectors → Add custom connector**. Enter your c
 - Host and Origin headers are checked against `PUBLIC_URL`. Logs never contain credentials, tokens or event contents.
 - The Docker setup runs as a non-root user with a read-only filesystem, no Linux capabilities, and the port bound to `127.0.0.1` so only your HTTPS proxy reaches it.
 - `--read-only` works here too, if you want Claude on the web to only read your calendar (on Workers: `"READ_ONLY": "1"` in `wrangler.jsonc`).
+- Per-calendar access works here too: set the `APPLE_CALENDAR_*_CALENDARS` variables (see [Choosing which calendars Claude can touch](#choosing-which-calendars-claude-can-touch)). On Workers they are `READ_ONLY_CALENDARS`, `HIDDEN_CALENDARS` and `ONLY_CALENDARS` in `wrangler.jsonc`.
 - On Cloudflare Workers, OAuth is handled by Cloudflare's [`workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): tokens are stored hashed in Workers KV and props are encrypted with the token. The same rules apply (Claude-only redirect URIs, 1 hour access tokens, 30 day rotating refresh tokens, lockout), with two differences: an old refresh token keeps working until its replacement is first used, and the lockout counter lives in KV, which is eventually consistent, so the limit is approximate.
 
 ### What the remote connector can't see
@@ -325,7 +345,7 @@ The test suite has six layers:
 | Layer | File | What it covers |
 |---|---|---|
 | Unit | `test_timeutil_recurrence.py`, `test_scheduling.py` | ISO parsing, DST-safe recurrence expansion, interval merging and free slots |
-| Service | `test_service.py` | Create, update and delete validation, `this` / `future` / `all` semantics on recurring series, agenda, conflicts and buffered free time |
+| Service | `test_service.py` | Create, update and delete validation, `this` / `future` / `all` semantics on recurring series, agenda, conflicts and buffered free time; `test_access.py` covers per-calendar read-only and hidden calendars through every tool |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py`, `test_caldav_store.py` | EventKit on a fake PyObjC layer. CalDAV against a real Radicale server, re-running every service scenario plus iCalendar mapping (overrides, EXDATE, all-day, alarms, RRULE) |
 | Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |

@@ -10,6 +10,7 @@
 import { OAuthProvider, insufficientScope, type OAuthResourceAuth } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
 
+import { AccessControlledStore, AccessPolicy } from "./access";
 import { SCOPE, message, passwordProblem, showLogin, submitLogin } from "./auth";
 import { CaldavStore } from "./caldav/store";
 import type { Env } from "./env";
@@ -40,6 +41,12 @@ class ConfigError extends Error {}
 let memory: MemoryStore | null = null; // per isolate; tests and demos only
 
 function storeOf(env: Env, zone: Zone): CalendarStore {
+  const policy = AccessPolicy.parse(env.READ_ONLY_CALENDARS, env.HIDDEN_CALENDARS, env.ONLY_CALENDARS);
+  const inner = backendOf(env, zone);
+  return policy.isOpen ? inner : new AccessControlledStore(inner, policy);
+}
+
+function backendOf(env: Env, zone: Zone): CalendarStore {
   if (env.BACKEND === "memory") return (memory ??= new MemoryStore());
   if (!env.CALDAV_USERNAME || !env.CALDAV_PASSWORD) {
     throw new ConfigError("CALDAV_USERNAME and CALDAV_PASSWORD are not set. Use npx wrangler secret put.");

@@ -23,7 +23,13 @@
     // Calendar id or title for new events; empty means the first writable one.
     "CALDAV_DEFAULT_CALENDAR": "",
     // "1" hides create/update/delete.
-    "READ_ONLY": "0"
+    "READ_ONLY": "0",
+    // Per-calendar access, as comma-separated calendar ids or titles. Read-only
+    // calendars can be read but not changed; hidden ones are invisible to Claude.
+    // ONLY_CALENDARS, if set, hides every calendar not listed.
+    "READ_ONLY_CALENDARS": "",
+    "HIDDEN_CALENDARS": "",
+    "ONLY_CALENDARS": ""
   }
   // Secrets (never in this file): npx wrangler secret put CALDAV_USERNAME / CALDAV_PASSWORD / CONNECTOR_PASSWORD
 }
