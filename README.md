@@ -107,7 +107,7 @@ On Claude Code older than 2.1.275, add the marketplace first:
 
 You need [uv](https://docs.astral.sh/uv/) on your `PATH`. The first start takes a little longer while uv installs the dependencies.
 
-Then do the permission setup once (it needs the Xcode Command Line Tools, `xcode-select --install`). Ask Claude to *"set up calendar access"* and it runs `install-app` and `doctor` for you, or run them yourself from a clone as in [Setup](#setup). If you set up the helper app before, the plugin reuses it. See [macOS permissions](#macos-permissions-read-this-if-nothing-works) for what the helper app is.
+Then do the permission setup once. Ask Claude to *"set up calendar access"* and it runs `install-app` and `doctor` for you, or run them yourself as in [Setup](#setup). The plugin runs from source, so its `install-app` compiles the helper and needs the Xcode Command Line Tools; without them, `uvx apple-calendar-eventkit-mcp install-app` installs the same helper prebuilt, and the plugin uses it. If you set up the helper app before, the plugin reuses it. See [macOS permissions](#macos-permissions-read-this-if-nothing-works) for what the helper app is.
 
 Plain chats on claude.ai, the desktop app and phones don't run local servers. For those, use the [remote connector](#remote-connector-claudeai-web-and-mobile).
 
@@ -116,7 +116,7 @@ Plain chats on claude.ai, the desktop app and phones don't run local servers. Fo
 - **What it starts.** Claude Code runs `uv run --locked --no-dev --project <plugin folder> apple-calendar-mcp`. On the first start uv installs the exact dependency versions from `uv.lock` (`mcp`, `pydantic`, `pyobjc-framework-EventKit` and what they need) from PyPI into a `.venv` inside the plugin folder, and downloads Python 3.11+ if none is installed. After a plugin update this happens once more.
 - **What it reads and writes.** The server only talks to macOS EventKit, the calendar database on your Mac. It makes no network requests of its own, keeps no copy of your events and writes no logs to disk. Events leave your Mac only as tool results inside your Claude conversation.
 - **Changes to your calendar.** Only through `create_event`, `update_event` and `delete_event`. They are marked as write and destructive tools, so Claude asks before running them. Start the server with `--read-only` to remove them.
-- **The helper app.** `install-app` runs only when you (or Claude, with your go-ahead) run it. It compiles a ~70-line C launcher with `clang` and writes the ad-hoc-signed `~/Applications/Apple Calendar MCP.app`. Delete that app to remove it.
+- **The helper app.** `install-app` runs only when you (or Claude, with your go-ahead) run it. It writes the ad-hoc-signed `~/Applications/Apple Calendar MCP.app` around a ~70-line C launcher: compiled with `clang` from a checkout, or prebuilt in the PyPI package. Delete that app to remove it.
 - **No accounts or credentials.** The plugin asks for no passwords or tokens. Your calendar accounts stay configured in macOS.
 
 This is an unofficial project and isn't affiliated with Apple.
@@ -131,11 +131,11 @@ uv run apple-calendar-mcp install-app   # builds the helper app that holds calen
 uv run apple-calendar-mcp doctor        # asks for permission, lists your calendars
 ```
 
-`doctor` triggers a macOS prompt for **"Apple Calendar MCP"**. Choose **Allow Full Access**. You only do this once: Claude Desktop, Claude Code and Terminal all reuse that permission. `install-app` needs the Xcode Command Line Tools (`xcode-select --install`).
+`doctor` triggers a macOS prompt for **"Apple Calendar MCP"**. Choose **Allow Full Access**. You only do this once: Claude Desktop, Claude Code and Terminal all reuse that permission. From a clone, `install-app` compiles the launcher, so it needs the Xcode Command Line Tools (`xcode-select --install`). The PyPI package below doesn't.
 
 ### Without cloning (PyPI)
 
-The server is also on PyPI as [`apple-calendar-eventkit-mcp`](https://pypi.org/project/apple-calendar-eventkit-mcp/), so `uvx` can run it without a clone:
+The server is also on PyPI as [`apple-calendar-eventkit-mcp`](https://pypi.org/project/apple-calendar-eventkit-mcp/), so `uvx` can run it without a clone. This is the easiest setup: the package carries the helper's launcher prebuilt (for Apple silicon and Intel), so nothing is compiled and Xcode isn't needed:
 
 ```bash
 uvx apple-calendar-eventkit-mcp install-app
@@ -174,7 +174,7 @@ claude mcp add apple-calendar -s user -- uv --directory /Users/YOU/Projects/appl
 apple-calendar-mcp [--read-only] [--timezone Europe/Istanbul] [--log-level INFO]
 apple-calendar-mcp --backend memory --demo     # fake data, no Mac needed
 apple-calendar-mcp doctor
-apple-calendar-mcp install-app [--dest PATH]
+apple-calendar-mcp install-app [--dest PATH] [--from-source]
 apple-calendar-mcp --backend caldav doctor     # iCloud over CalDAV (CALDAV_* env vars)
 apple-calendar-mcp serve-http [--host H] [--port P]   # remote connector, see below
 ```
@@ -201,7 +201,7 @@ Titles are matched case-insensitively and match every calendar with that title, 
 
 macOS protects calendars with TCC (Transparency, Consent and Control). It asks on behalf of the **responsible app**: normally the GUI app that started the process. Since macOS 14 that app must declare `NSCalendarsFullAccessUsageDescription` in its Info.plist, or the request is **refused without any prompt**. Terminal and Claude don't declare it, so running the server directly fails with *"macOS refused calendar access without showing a prompt"*.
 
-`install-app` fixes this. It builds `~/Applications/Apple Calendar MCP.app`, a tiny ad-hoc-signed bundle with no Dock icon. The bundle declares calendar access and contains a ~70-line C launcher ([`launcher.c`](src/apple_calendar_mcp/macos_helper/launcher.c)). When the bundle is installed, `apple-calendar-mcp` re-runs itself through the launcher. The launcher makes the bundle responsible for its own permissions, so macOS asks for "Apple Calendar MCP" whichever app started the server. Your Claude config doesn't change.
+`install-app` fixes this. It builds `~/Applications/Apple Calendar MCP.app`, a tiny ad-hoc-signed bundle with no Dock icon. The bundle declares calendar access and contains a ~70-line C launcher ([`launcher.c`](src/apple_calendar_mcp/macos_helper/launcher.c)). Releases on PyPI ship that launcher prebuilt, compiled from the same commit by the [release workflow](.github/workflows/release.yml) on GitHub's macOS runners; from a git checkout it's compiled locally. Pass `--from-source` to compile it yourself either way. When the bundle is installed, `apple-calendar-mcp` re-runs itself through the launcher. The launcher makes the bundle responsible for its own permissions, so macOS asks for "Apple Calendar MCP" whichever app started the server. Your Claude config doesn't change.
 
 - Choose **Allow Full Access**. "Add Events Only" is not enough to read your events.
 - To change your answer later: **System Settings → Privacy & Security → Calendars → Apple Calendar MCP**.

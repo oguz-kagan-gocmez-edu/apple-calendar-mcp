@@ -22,6 +22,8 @@ htmlcov/
 
 # Helper app if built inside the repo (install-app --dest ...)
 *.app/
+# Prebuilt launcher: built by scripts/build-helper.sh for the wheel, never committed
+src/apple_calendar_mcp/macos_helper/apple-calendar-mcp-launcher
 
 # Editors and macOS
 .idea/

@@ -167,11 +167,14 @@ def _install_app(args: argparse.Namespace) -> int:
         print("install-app is only needed on macOS.", file=sys.stderr)
         return 1
     try:
-        app = macos_app.build_app(Path(args.dest) if args.dest else None)
+        app, source = macos_app.build_app(
+            Path(args.dest) if args.dest else None, from_source=args.from_source
+        )
     except macos_app.AppBuildError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(f"Installed {app}")
+    how = "prebuilt launcher" if source == "prebuilt" else "launcher compiled from source"
+    print(f"Installed {app} ({how})")
     print("Next: run `apple-calendar-mcp doctor` and click Allow Full Access for 'Apple Calendar MCP'.")
     return 0
 
@@ -201,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-level", default="WARNING")
     parser.add_argument(
         "--dest", help="install-app: bundle path (default: ~/Applications/Apple Calendar MCP.app)"
+    )
+    parser.add_argument(
+        "--from-source",
+        action="store_true",
+        help="install-app: compile the launcher with clang instead of using the prebuilt one",
     )
     parser.add_argument("--host", help="serve-http: bind address (default: $HOST or 127.0.0.1)")
     parser.add_argument("--port", type=int, help="serve-http: port (default: $PORT or 8000)")

@@ -5,9 +5,12 @@ unless the *responsible* app (the one that started us, e.g. Claude or
 Terminal) declares NSCalendarsFullAccessUsageDescription, and neither does.
 
 `apple-calendar-mcp install-app` builds a tiny app bundle that declares it.
-Once installed, the CLI re-runs itself through the bundle's launcher, so the
-permission belongs to "Apple Calendar MCP" no matter which app starts the
-server. See macos_helper/launcher.c for the launcher itself.
+Releases on PyPI carry the launcher prebuilt (a universal binary compiled by
+the release workflow from macos_helper/launcher.c), so installing needs no
+compiler; from a git checkout it is compiled with clang. Once installed,
+the CLI re-runs itself through the bundle's launcher, so the permission
+belongs to "Apple Calendar MCP" no matter which app starts the server. See
+macos_helper/launcher.c for the launcher itself.
 """
 
 from __future__ import annotations
@@ -19,8 +22,9 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import __version__
 
@@ -65,28 +69,68 @@ def launcher_source() -> str:
     return resources.files("apple_calendar_mcp").joinpath("macos_helper/launcher.c").read_text("utf-8")
 
 
+# Mach-O magic numbers: universal ("fat") binaries and 64-bit thin ones.
+_MACHO_MAGIC = (b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe")
+
+
+def prebuilt_launcher() -> Traversable | None:
+    """The launcher shipped in the wheel, or None (e.g. a git checkout)."""
+    f = resources.files("apple_calendar_mcp").joinpath(f"macos_helper/{EXECUTABLE}")
+    try:
+        head = f.read_bytes()[:4] if f.is_file() else b""
+    except OSError:
+        return None
+    return f if head in _MACHO_MAGIC else None
+
+
 class AppBuildError(RuntimeError):
     pass
 
 
-def build_app(app: Path | None = None, run: Runner = subprocess.run) -> Path:
-    """Compile the launcher, write Info.plist and ad-hoc sign the bundle."""
+Source = Literal["prebuilt", "compiled"]
+
+
+def build_app(
+    app: Path | None = None,
+    run: Runner = subprocess.run,
+    *,
+    from_source: bool = False,
+    prebuilt: Traversable | None = None,
+) -> tuple[Path, Source]:
+    """Put the launcher in place, write Info.plist and ad-hoc sign the bundle.
+
+    Uses the prebuilt launcher when the package has one (unless ``from_source``),
+    otherwise compiles ``launcher.c`` with clang. Returns the app and which it used.
+    """
     app = app or default_app_path()
-    clang = shutil.which("clang")
-    if clang is None:
-        raise AppBuildError("clang not found. Install the Xcode Command Line Tools: xcode-select --install")
+    prebuilt = None if from_source else (prebuilt or prebuilt_launcher())
+    clang = None if prebuilt else shutil.which("clang")
+    if prebuilt is None and clang is None:
+        raise AppBuildError(
+            "clang not found, and this copy of apple-calendar-mcp has no prebuilt helper (it's from "
+            "a git checkout). Either install the Xcode Command Line Tools (xcode-select --install), "
+            "or install the same helper ready-made from PyPI: uvx apple-calendar-eventkit-mcp install-app"
+        )
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True, exist_ok=True)
     (contents / "Info.plist").write_bytes(info_plist())
-    src = contents / "launcher.c"
-    src.write_text(launcher_source(), "utf-8")
+    exe = launcher_path(app)
     try:
-        run([clang, "-O2", "-Wall", "-o", str(launcher_path(app)), str(src)], check=True)
-        src.unlink()
+        if prebuilt is not None:
+            tmp = exe.with_name(exe.name + ".new")
+            tmp.write_bytes(prebuilt.read_bytes())
+            tmp.chmod(0o755)
+            tmp.replace(exe)  # atomic, even over a running launcher
+        else:
+            assert clang is not None
+            src = contents / "launcher.c"
+            src.write_text(launcher_source(), "utf-8")
+            run([clang, "-O2", "-Wall", "-o", str(exe), str(src)], check=True)
+            src.unlink()
         run(["codesign", "--force", "--sign", "-", str(app)], check=True)
     except (subprocess.CalledProcessError, OSError) as exc:
         raise AppBuildError(f"building {app} failed: {exc}") from exc
-    return app
+    return app, "prebuilt" if prebuilt is not None else "compiled"
 
 
 def relaunch_command(

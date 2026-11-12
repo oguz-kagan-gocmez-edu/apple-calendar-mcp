@@ -163,22 +163,24 @@ def test_install_app(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
-    built: list[Path | None] = []
+    built: list[tuple[Path | None, bool]] = []
 
-    def fake_build(app: Path | None = None) -> Path:
-        built.append(app)
-        return app or tmp_path
+    def fake_build(app: Path | None = None, *, from_source: bool = False) -> tuple[Path, str]:
+        built.append((app, from_source))
+        return app or tmp_path, "compiled" if from_source else "prebuilt"
 
     monkeypatch.setattr(macos_app, "build_app", fake_build)
     assert cli.main(["install-app", "--dest", str(tmp_path / "X.app")]) == 0
-    assert built == [tmp_path / "X.app"]
-    assert "Installed" in capsys.readouterr().out
+    assert "(prebuilt launcher)" in capsys.readouterr().out
+    assert cli.main(["install-app", "--from-source"]) == 0
+    assert "(launcher compiled from source)" in capsys.readouterr().out
+    assert built == [(tmp_path / "X.app", False), (None, True)]
 
 
 def test_install_app_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
 
-    def broken_build(app: Path | None = None) -> Path:
+    def broken_build(app: Path | None = None, *, from_source: bool = False) -> tuple[Path, str]:
         raise macos_app.AppBuildError("clang not found")
 
     monkeypatch.setattr(macos_app, "build_app", broken_build)

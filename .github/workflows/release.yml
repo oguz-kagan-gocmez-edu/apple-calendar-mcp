@@ -13,8 +13,23 @@ permissions:
   contents: read
 
 jobs:
+  helper:
+    name: Build the helper app launcher
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A universal binary (Apple silicon + Intel) from launcher.c in this
+      # very commit, shipped in the wheel so `install-app` needs no compiler.
+      - run: scripts/build-helper.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: src/apple_calendar_mcp/macos_helper/apple-calendar-mcp-launcher
+          if-no-files-found: error
+
   pypi:
     name: Publish to PyPI
+    needs: helper
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -37,7 +52,27 @@ jobs:
             [ "$v" = "$tag" ] || { echo "::error::version $v doesn't match tag v$tag"; exit 1; }
           done
 
-      - run: uv build
+      - uses: actions/download-artifact@v4
+        with:
+          name: launcher
+          path: src/apple_calendar_mcp/macos_helper
+
+      # The wheel is built from the source tree, not from the sdist, because
+      # the sdist (rightly) leaves out the git-ignored binary.
+      - run: |
+          uv build --sdist
+          uv build --wheel
+
+      - name: Check the wheel carries the universal launcher
+        run: |
+          set -euo pipefail
+          unzip -o -q dist/*.whl 'apple_calendar_mcp/macos_helper/apple-calendar-mcp-launcher' -d "$RUNNER_TEMP/whl"
+          file "$RUNNER_TEMP/whl/apple_calendar_mcp/macos_helper/apple-calendar-mcp-launcher" | tee /dev/stderr \
+            | grep -q "Mach-O universal binary with 2 architectures" \
+            || { echo "::error::the wheel has no universal launcher"; exit 1; }
+          if tar -tzf dist/*.tar.gz | grep -q 'apple-calendar-mcp-launcher$'; then
+            echo "::error::the sdist must not contain the binary"; exit 1
+          fi
 
       - name: Check the registry ownership line is in the package description
         run: |
