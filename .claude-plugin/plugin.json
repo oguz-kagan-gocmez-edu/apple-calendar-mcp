@@ -1,0 +1,35 @@
+{
+  "name": "apple-calendar-mcp",
+  "displayName": "Apple Calendar for Mac",
+  "version": "0.1.0",
+  "description": "Read and manage the calendars on your Mac (iCloud, Google, Exchange) through EventKit: list events, find free time, create, move and delete events. Runs locally; unofficial, not affiliated with Apple.",
+  "author": {
+    "name": "Oğuz Kağan Göçmez",
+    "url": "https://github.com/oguz-kagan-gocmez-edu"
+  },
+  "homepage": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#readme",
+  "repository": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp",
+  "documentationUrl": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#claude-plugin",
+  "supportUrl": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp/issues",
+  "privacyPolicyUrl": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#what-the-plugin-runs-and-sends",
+  "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
+  "keywords": ["calendar", "macos", "eventkit", "icloud", "scheduling", "mcp"],
+  "mcpServers": {
+    "apple-calendar": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--no-dev",
+        "--quiet",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "apple-calendar-mcp"
+      ],
+      "env": {
+        "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/venv"
+      }
+    }
+  }
+}
