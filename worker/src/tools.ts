@@ -21,7 +21,7 @@ import type { CalendarService } from "./service";
 import { CalendarError } from "./store";
 import type { Zone } from "./time";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.3.0";
 
 export const INSTRUCTIONS = `\
 Tools for the user's Apple Calendar (the calendars in their iCloud account).
