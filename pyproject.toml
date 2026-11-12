@@ -3,8 +3,8 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "apple-calendar-mcp"
-version = "0.1.0"
+name = "apple-calendar-eventkit-mcp"
+version = "0.2.0"
 description = "MCP server that lets Claude read and manage Apple Calendar on macOS via EventKit"
 readme = "README.md"
 license = "MIT"
@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 apple-calendar-mcp = "apple_calendar_mcp.cli:main"
+apple-calendar-eventkit-mcp = "apple_calendar_mcp.cli:main"
 
 [project.optional-dependencies]
 remote = [

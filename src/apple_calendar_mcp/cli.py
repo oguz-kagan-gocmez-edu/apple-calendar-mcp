@@ -37,7 +37,7 @@ def caldav_store_from_env(tz: tzinfo) -> CalendarStore:
     except ImportError as exc:  # optional extra not installed
         raise SystemExit(
             "The CalDAV backend needs the 'remote' extra: uv sync --extra remote "
-            "(or pip install 'apple-calendar-mcp[remote]')."
+            "(or pip install 'apple-calendar-eventkit-mcp[remote]')."
         ) from exc
     username = os.environ.get("CALDAV_USERNAME", "").strip()
     password = os.environ.get("CALDAV_PASSWORD", "").strip()

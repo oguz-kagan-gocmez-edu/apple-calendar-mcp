@@ -1,0 +1,92 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish that version to PyPI and then to the
+# MCP Registry. Both use GitHub's OIDC identity, so there are no secrets:
+# PyPI trusts this workflow through a "trusted publisher" entry, and the
+# registry trusts it for the io.github.oguz-kagan-gocmez-edu/* namespace.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check that every version matches the tag
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          project="$(uv version --short)"
+          package="$(sed -nE 's/^__version__ = "(.*)"$/\1/p' src/apple_calendar_mcp/__init__.py)"
+          server="$(jq -r .version server.json)"
+          server_pkg="$(jq -r '.packages[0].version' server.json)"
+          echo "tag=$tag pyproject=$project __init__=$package server.json=$server/$server_pkg"
+          for v in "$project" "$package" "$server" "$server_pkg"; do
+            [ "$v" = "$tag" ] || { echo "::error::version $v doesn't match tag v$tag"; exit 1; }
+          done
+
+      - run: uv build
+
+      - name: Check the registry ownership line is in the package description
+        run: |
+          set -euo pipefail
+          name="$(jq -r .name server.json)"
+          unzip -p dist/*.whl '*.dist-info/METADATA' | grep -q "mcp-name: $name" \
+            || { echo "::error::README is missing 'mcp-name: $name'"; exit 1; }
+
+      - run: uv publish --trusted-publishing always
+
+  registry:
+    name: Publish to the MCP Registry
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # MCP Registry OIDC login
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait until PyPI serves the new version
+        run: |
+          set -euo pipefail
+          url="https://pypi.org/pypi/apple-calendar-eventkit-mcp/${GITHUB_REF_NAME#v}/json"
+          for _ in $(seq 30); do
+            curl --fail --silent --output /dev/null "$url" && exit 0
+            sleep 10
+          done
+          echo "::error::PyPI never served $url"; exit 1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
