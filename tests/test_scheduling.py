@@ -4,7 +4,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from apple_calendar_mcp.models import Event
-from apple_calendar_mcp.scheduling import find_free_slots, merge_intervals, subtract
+from apple_calendar_mcp.scheduling import (
+    busy_time,
+    find_conflicts,
+    find_free_slots,
+    merge_intervals,
+    subtract,
+)
 
 IST = ZoneInfo("Europe/Istanbul")
 
@@ -95,3 +101,58 @@ def test_max_slots_truncates() -> None:
 def test_rejects_non_positive_duration() -> None:
     with pytest.raises(ValueError):
         find_free_slots([], window_start=at(2, 0), window_end=at(3, 0), duration=timedelta(0), tz=IST)
+
+
+# ------------------------------------------------------------------ declined, buffers, conflicts
+def test_declined_invitations_do_not_block() -> None:
+    events = [ev(at(2, 10), at(2, 12), my_status="declined"), ev(at(2, 13), at(2, 14), my_status="pending")]
+    slots = _slots(events, duration=timedelta(hours=3))
+    assert slots == [(at(2, 9), at(2, 13)), (at(2, 14), at(2, 18))]
+
+
+def test_buffer_keeps_time_clear_around_events() -> None:
+    slots = _slots([ev(at(2, 12), at(2, 13))], buffer=timedelta(minutes=15))
+    assert slots == [(at(2, 9), at(2, 11, 45)), (at(2, 13, 15), at(2, 18))]
+
+
+def test_buffer_ignores_zero_length_markers() -> None:
+    slots = _slots([ev(at(2, 12), at(2, 12))], buffer=timedelta(minutes=30))
+    assert slots == [(at(2, 9), at(2, 18))]
+
+
+def named(title: str, start: datetime, end: datetime, **kw: object) -> Event:
+    return Event(
+        id=f"{title}|0", calendar_id="c", calendar_title="C", title=title, start=start, end=end, **kw
+    )
+
+
+def test_conflicts_are_overlapping_pairs() -> None:
+    events = [
+        named("a", at(2, 9), at(2, 11)),
+        named("b", at(2, 10), at(2, 12)),
+        named("c", at(2, 10, 30), at(2, 10, 45)),
+        named("d", at(2, 12), at(2, 13)),  # touches b: no conflict
+    ]
+    found = [(a.title, b.title, s, e) for a, b, s, e in find_conflicts(events)]
+    assert found == [
+        ("a", "b", at(2, 10), at(2, 11)),
+        ("a", "c", at(2, 10, 30), at(2, 10, 45)),
+        ("b", "c", at(2, 10, 30), at(2, 10, 45)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw", [{"availability": "free"}, {"status": "canceled"}, {"my_status": "declined"}, {"all_day": True}]
+)
+def test_conflicts_skip_events_that_do_not_take_time(kw: dict[str, object]) -> None:
+    events = [named("a", at(2, 9), at(2, 11)), named("b", at(2, 10), at(2, 12), **kw)]
+    assert find_conflicts(events) == []
+
+
+def test_busy_time_counts_overlaps_once_inside_the_window() -> None:
+    events = [
+        named("a", at(2, 8), at(2, 10)),  # half outside the 9:00 window start
+        named("b", at(2, 9, 30), at(2, 10, 30)),
+        named("free", at(2, 14), at(2, 15), availability="free"),
+    ]
+    assert busy_time(events, (at(2, 9), at(2, 18))) == timedelta(minutes=90)

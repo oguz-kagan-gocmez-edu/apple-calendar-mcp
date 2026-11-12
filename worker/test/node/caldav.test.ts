@@ -106,6 +106,34 @@ describe("CalDAV store", () => {
     expect(text).toContain("EXDATE");
   });
 
+  it("reads your own reply from the attendee matching the account email", async () => {
+    const user = `u${crypto.randomUUID().slice(0, 8)}@example.com`; // the attendee address
+    const login = user.toUpperCase(); // matched case-insensitively
+    const store = await freshStore(login);
+    const base = `${new URL(store.client.baseUrl).origin}/${login}/home/`;
+    const invite = async (uid: string, partstat: string) => {
+      const res = await fetch(`${base}${uid}.ics`, {
+        method: "PUT",
+        headers: { Authorization: `Basic ${btoa(`${login}:x`)}`, "Content-Type": "text/calendar" },
+        body:
+          "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\n" +
+          `UID:${uid}\r\nDTSTAMP:20261101T000000Z\r\n` +
+          "DTSTART:20261103T060000Z\r\nDTEND:20261103T070000Z\r\nSUMMARY:Review\r\n" +
+          "ORGANIZER:mailto:boss@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:boss@example.com\r\n" +
+          `ATTENDEE;PARTSTAT=${partstat}:mailto:${user}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`,
+      });
+      expect(res.status).toBe(201);
+    };
+    await invite("a", "NEEDS-ACTION");
+    await invite("b", "DECLINED");
+    const got = Object.fromEntries(
+      (await store.listEvents(at(3, 0), at(4, 0))).map((e) => [e.id.split("|")[0], e.my_status]),
+    );
+    expect(got).toEqual({ a: "pending", b: "declined" });
+    const own = await store.createEvent(draft({ title: "Mine", start: at(3, 12), end: at(3, 13) }));
+    expect((await store.getEvent(own.id)).my_status).toBeNull();
+  });
+
   it("quotes foreign UIDs so they can't escape the calendar", () => {
     expect(objectHref("https://dav.example/123/calendars/work/", "../../other/evil")).toBe(
       "https://dav.example/123/calendars/work/..%2F..%2Fother%2Fevil.ics",

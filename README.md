@@ -17,6 +17,11 @@ It can also run as a **remote connector** for claude.ai on the web and on your p
 You:    Find me two free hours this week for the CS350 project, then block them.
 Claude: ▸ get_time_context  ▸ find_free_slots  ▸ create_event
         Booked "CS350 project" Thu 13:00–15:00 in Work. Wednesday 09:00–11:00 was also free.
+
+You:    What does my day look like?
+Claude: ▸ agenda
+        Lecture until 12:00, then lunch, which overlaps it by 30 minutes. You're free
+        12:30–16:00. The 16:00 design review is still waiting for your reply.
 ```
 
 ## Features
@@ -28,13 +33,16 @@ Claude: ▸ get_time_context  ▸ find_free_slots  ▸ create_event
 | `list_events` | Events in a range, with recurring events expanded into occurrences | read |
 | `search_events` | Case-insensitive search across title, location and notes; all terms must match | read |
 | `get_event` | Full details, including attendees and repeat rule | read |
-| `find_free_slots` | Gaps of at least *N* minutes within working hours, skipping weekends if you want | read |
+| `agenda` | A day (or up to 14) in one call: what's on now and next, all-day items, busy minutes, free gaps left, overlaps and unanswered invitations | read |
+| `find_conflicts` | Double bookings: pairs of events that overlap and both take the time | read |
+| `find_free_slots` | Gaps of at least *N* minutes within working hours, with an optional buffer around other events, skipping weekends if you want | read |
 | `create_event` | Timed or all-day events, with alarms, URL and repeat rules | write |
 | `update_event` | Partial edits. Recurring events take `span`: `this`, `future` or `all` | write |
 | `delete_event` | Delete one occurrence, this and later ones, or the whole series | destructive |
 
 Other parts of the design:
 
+- **Free/busy that matches reality.** Free time, busy minutes and conflicts ignore all-day events, events marked *free*, canceled events and invitations you declined. Invitations you haven't answered still count as busy, and `agenda` lists them separately.
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
 - **`--read-only` mode.** Runs the server without the write tools at all.
 - **Prompt-injection hygiene.** The server tells the model that event text is untrusted data. Anyone who sends you an invite controls that text.
@@ -317,7 +325,7 @@ The test suite has six layers:
 | Layer | File | What it covers |
 |---|---|---|
 | Unit | `test_timeutil_recurrence.py`, `test_scheduling.py` | ISO parsing, DST-safe recurrence expansion, interval merging and free slots |
-| Service | `test_service.py` | Create, update and delete validation, plus `this` / `future` / `all` semantics on recurring series |
+| Service | `test_service.py` | Create, update and delete validation, `this` / `future` / `all` semantics on recurring series, agenda, conflicts and buffered free time |
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py`, `test_caldav_store.py` | EventKit on a fake PyObjC layer. CalDAV against a real Radicale server, re-running every service scenario plus iCalendar mapping (overrides, EXDATE, all-day, alarms, RRULE) |
 | Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |

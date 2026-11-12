@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
 
-from .models import Availability, Calendar, Event, EventDraft, EventPatch, Recurrence, Span
+from .models import AttendeeStatus, Availability, Calendar, Event, EventDraft, EventPatch, Recurrence, Span
 from .recurrence import count_before, occurrence_starts
 from .store import (
     InvalidRequestError,
@@ -45,6 +45,7 @@ class _Series:
     alarms: list[int] = field(default_factory=list)
     recurrence: Recurrence | None = None
     availability: Availability = "busy"
+    my_status: AttendeeStatus | None = None  # your reply, when it's an invitation
     exdates: set[int] = field(default_factory=set)
     overrides: dict[int, dict[str, Any]] = field(default_factory=dict)
 
@@ -122,6 +123,7 @@ class MemoryStore:
             recurrence=s.recurrence,
             alarms_minutes_before=list(ov.get("alarms", s.alarms)),
             availability=ov.get("availability", s.availability),
+            my_status=s.my_status,
         )
 
     @staticmethod
@@ -192,6 +194,7 @@ class MemoryStore:
             alarms=list(s.alarms),
             recurrence=tail_rule,
             availability=s.availability,
+            my_status=s.my_status,
             exdates={t for t in s.exdates if t >= cut},
             overrides={t: v for t, v in s.overrides.items() if t >= cut},
         )
@@ -236,6 +239,11 @@ class MemoryStore:
                         out.append(ev)
             out.sort(key=lambda e: (e.start, e.title))
             return out
+
+    def set_my_status(self, event_id: str, status: AttendeeStatus | None) -> None:
+        """Mark a series as an invitation with your reply (tests and the demo only)."""
+        with self._lock:
+            self._locate(event_id)[0].my_status = status
 
     def get_event(self, event_id: str) -> Event:
         with self._lock:
@@ -353,6 +361,16 @@ def seed_demo(store: MemoryStore, today: date | None = None) -> None:
     add("Robotics team meeting", at(1, 18), 90, "work", recurrence=Recurrence(frequency="weekly"))
     add("Gym", at(2, 7, 30), 60, alarms_minutes_before=[15])
     add("Coffee with Ali", at(3, 15), 45, location="Kampüs Kafe")
+    invite = store.create_event(
+        EventDraft(
+            title="Capstone kickoff",
+            start=at(3, 14, 30),
+            end=at(3, 15, 30),
+            calendar_id="work",
+            location="Zoom",
+        )
+    )
+    store.set_my_status(invite.id, "pending")
     add("Lab report deadline", at(4, 23, 59), 0, "work", alarms_minutes_before=[1440, 60])
     store.create_event(
         EventDraft(

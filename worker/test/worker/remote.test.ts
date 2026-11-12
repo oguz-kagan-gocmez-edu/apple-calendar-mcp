@@ -261,6 +261,8 @@ describe("mcp", () => {
       search_events: true,
       get_event: true,
       find_free_slots: true,
+      agenda: true,
+      find_conflicts: true,
       create_event: false,
       update_event: false,
       delete_event: false,
@@ -287,6 +289,13 @@ describe("mcp", () => {
     const bad = await callTool(tokens.access_token, "create_event", { title: "X", start: "not a date" });
     expect(bad.isError).toBe(true);
     expect(bad.content[0]!.text).toContain("start");
+
+    const agenda = await callTool(tokens.access_token, "agenda", { day: "2030-01-07" });
+    expect(agenda.isError).toBeFalsy();
+    expect((agenda.structuredContent!.events as { id: string }[]).map((e) => e.id)).toContain(event.id);
+    expect(agenda.structuredContent!.busy_minutes).toBeGreaterThanOrEqual(30);
+    const conflicts = await callTool(tokens.access_token, "find_conflicts", { start: "2030-01-07", end: "2030-01-07" });
+    expect(conflicts.structuredContent).toMatchObject({ timezone: "Europe/Istanbul", truncated: false });
 
     const deleted = await callTool(tokens.access_token, "delete_event", { event_id: event.id });
     expect(deleted.structuredContent).toMatchObject({ deleted: true, title: "Worker test" });

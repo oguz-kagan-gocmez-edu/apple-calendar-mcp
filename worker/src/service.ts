@@ -5,8 +5,11 @@
  */
 
 import type {
+  Agenda,
   Availability,
   Calendar,
+  Conflict,
+  ConflictResult,
   DeleteResult,
   Event,
   EventDraft,
@@ -16,8 +19,8 @@ import type {
   Recurrence,
   Span,
 } from "./models";
-import { patchIsEmpty } from "./models";
-import { findFreeSlots } from "./scheduling";
+import { eventRef, patchIsEmpty } from "./models";
+import { type ConflictPair, busyTime, findConflicts, findFreeSlots } from "./scheduling";
 import { type CalendarStore, InvalidRequestError } from "./store";
 import {
   type CivilDate,
@@ -27,6 +30,7 @@ import {
   HOUR,
   MINUTE,
   addDays,
+  at,
   compareDates,
   dayNumber,
   isDateOnly,
@@ -40,6 +44,12 @@ const MAX_RANGE_DAYS = 366;
 const MAX_ALARM_MINUTES = 4 * 7 * 24 * 60; // four weeks
 const ALLOWED_URL_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 const DEFAULT_DURATION = HOUR;
+const MAX_BUFFER_MINUTES = 240;
+const MAX_AGENDA_DAYS = 14;
+
+function conflict([a, b, start, end]: ConflictPair): Conflict {
+  return { start, end, overlap_minutes: Math.floor((end - start) / MINUTE), events: [eventRef(a), eventRef(b)] };
+}
 
 export interface TimeContext {
   now: number;
@@ -89,6 +99,16 @@ export interface FreeSlotInput {
   working_hours_end?: string;
   include_weekends?: boolean;
   max_slots?: number;
+  buffer_minutes?: number;
+}
+
+export interface AgendaInput {
+  day?: string | null;
+  days?: number;
+  calendar_ids?: string[] | null;
+  working_hours_start?: string;
+  working_hours_end?: string;
+  min_free_minutes?: number;
 }
 
 export class CalendarService {
@@ -232,16 +252,18 @@ export class CalendarService {
     if (!Number.isInteger(maxSlots) || maxSlots < 1 || maxSlots > 200) {
       throw new InvalidRequestError("max_slots must be between 1 and 200.");
     }
-    let dayStart: number, dayEnd: number;
-    try {
-      dayStart = parseClock(input.working_hours_start ?? "09:00");
-      dayEnd = parseClock(input.working_hours_end ?? "18:00");
-    } catch (err) {
-      throw new InvalidRequestError((err as Error).message);
+    const bufferMinutes = input.buffer_minutes ?? 0;
+    if (!Number.isInteger(bufferMinutes) || bufferMinutes < 0 || bufferMinutes > MAX_BUFFER_MINUTES) {
+      throw new InvalidRequestError(`buffer_minutes must be between 0 and ${MAX_BUFFER_MINUTES}.`);
     }
+    const [dayStart, dayEnd] = CalendarService.workingHours(input.working_hours_start, input.working_hours_end);
+    const buffer = bufferMinutes * MINUTE;
     s = Math.max(s, Math.floor(this.now() / MINUTE) * MINUTE); // no slots in the past
+    // Events just outside the window still push the buffer into it.
     const events =
-      s < e ? await this.store.listEvents(s, e, input.calendar_ids?.length ? input.calendar_ids : null) : [];
+      s < e
+        ? await this.store.listEvents(s - buffer, e + buffer, input.calendar_ids?.length ? input.calendar_ids : null)
+        : [];
     const [slots, truncated] = findFreeSlots(events, {
       windowStart: s,
       windowEnd: e,
@@ -251,8 +273,87 @@ export class CalendarService {
       dayEnd,
       includeWeekends: input.include_weekends ?? false,
       maxSlots,
+      bufferMs: buffer,
     });
     return { slots, truncated };
+  }
+
+  private static workingHours(start = "09:00", end = "18:00"): [number, number] {
+    try {
+      return [parseClock(start), parseClock(end)];
+    } catch (err) {
+      throw new InvalidRequestError((err as Error).message);
+    }
+  }
+
+  async findConflicts(start: string, end: string, calendarIds?: string[] | null, limit = 100): Promise<ConflictResult> {
+    const [s, e] = this.range(start, end);
+    const lim = CalendarService.limit(limit);
+    const pairs = findConflicts(await this.store.listEvents(s, e, calendarIds?.length ? calendarIds : null)).map(
+      conflict,
+    );
+    return {
+      range_start: s,
+      range_end: e,
+      count: Math.min(pairs.length, lim),
+      truncated: pairs.length > lim,
+      conflicts: pairs.slice(0, lim),
+    };
+  }
+
+  async agenda(input: AgendaInput = {}): Promise<Agenda> {
+    const days = input.days ?? 1;
+    if (!Number.isInteger(days) || days < 1 || days > MAX_AGENDA_DAYS) {
+      throw new InvalidRequestError(`days must be between 1 and ${MAX_AGENDA_DAYS}.`);
+    }
+    const minFree = input.min_free_minutes ?? 30;
+    if (!Number.isInteger(minFree) || minFree < 5 || minFree > 24 * 60) {
+      throw new InvalidRequestError("min_free_minutes must be between 5 and 1440.");
+    }
+    const [dayStart, dayEnd] = CalendarService.workingHours(input.working_hours_start, input.working_hours_end);
+    const now = Math.floor(this.now() / 1000) * 1000;
+    const first = input.day ? this.parse(input.day, "day").date : this.zone.date(now);
+    const s = this.zone.startOfDay(first);
+    const e = this.zone.startOfDay(addDays(first, days));
+
+    const events = (await this.store.listEvents(s, e, input.calendar_ids?.length ? input.calendar_ids : null))
+      .filter((ev) => ev.status !== "canceled")
+      .sort(byStartThenTitle);
+    const timed = events.filter((ev) => !ev.all_day);
+    const attending = timed.filter((ev) => ev.my_status !== "declined");
+
+    let busy = 0;
+    for (let i = 0; i < days; i++) {
+      const d = addDays(first, i);
+      const ws = this.zone.instant(at(d, dayStart));
+      const we = this.zone.instant(at(dayEnd > dayStart ? d : addDays(d, 1), dayEnd));
+      busy += busyTime(timed, [ws, we]);
+    }
+
+    const [free] = findFreeSlots(timed, {
+      windowStart: Math.max(s, Math.floor(now / MINUTE) * MINUTE),
+      windowEnd: e,
+      durationMs: minFree * MINUTE,
+      zone: this.zone,
+      dayStart,
+      dayEnd,
+      includeWeekends: true,
+      maxSlots: 50,
+    });
+    const upNext = attending.find((ev) => ev.start > now);
+    return {
+      range_start: s,
+      range_end: e,
+      now,
+      happening_now: attending.filter((ev) => ev.start <= now && now < ev.end).map(eventRef),
+      up_next: upNext ? eventRef(upNext) : null,
+      all_day: events.filter((ev) => ev.all_day).map(eventRef),
+      events: timed.map(eventRef),
+      busy_minutes: Math.floor(busy / MINUTE),
+      free_time: free,
+      conflicts: findConflicts(timed).map(conflict),
+      invitations: events.filter((ev) => ev.my_status === "pending").map(eventRef),
+    };
   }
 
   // ------------------------------------------------------------ commands

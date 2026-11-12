@@ -108,6 +108,61 @@ export interface Event {
   status: EventStatus;
   organizer: string | null;
   attendees: Attendee[];
+  /** Your own reply when you're invited ('pending' = not answered yet); null when you aren't an attendee. */
+  my_status: AttendeeStatus | null;
+}
+
+/** A compact pointer to one occurrence, for summaries. */
+export interface EventRef {
+  id: string;
+  title: string;
+  start: number;
+  end: number;
+  all_day: boolean;
+  calendar_title: string;
+  location: string | null;
+}
+
+export function eventRef(e: Event): EventRef {
+  return {
+    id: e.id,
+    title: e.title,
+    start: e.start,
+    end: e.end,
+    all_day: e.all_day,
+    calendar_title: e.calendar_title,
+    location: e.location,
+  };
+}
+
+export interface Conflict {
+  start: number;
+  end: number;
+  overlap_minutes: number;
+  /** The two events that overlap. */
+  events: [EventRef, EventRef];
+}
+
+export interface ConflictResult {
+  range_start: number;
+  range_end: number;
+  count: number;
+  truncated: boolean;
+  conflicts: Conflict[];
+}
+
+export interface Agenda {
+  range_start: number;
+  range_end: number;
+  now: number;
+  happening_now: EventRef[];
+  up_next: EventRef | null;
+  all_day: EventRef[];
+  events: EventRef[];
+  busy_minutes: number;
+  free_time: FreeSlot[];
+  conflicts: Conflict[];
+  invitations: EventRef[];
 }
 
 export interface EventList {
