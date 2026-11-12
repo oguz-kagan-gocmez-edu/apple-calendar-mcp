@@ -148,6 +148,27 @@ class ConflictResult(_Model):
     conflicts: list[Conflict]
 
 
+class DuplicateGroup(_Model):
+    title: str
+    start: datetime
+    end: datetime
+    all_day: bool = False
+    repeats: int = Field(
+        description="1 for one-off copies. More: the copies are repeating series that share this "
+        "many occurrences in the range; 'events' holds the first one of each."
+    )
+    events: list[EventRef] = Field(description="The copies. Keep one; the others are the extras.")
+
+
+class DuplicateResult(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    count: int
+    truncated: bool
+    groups: list[DuplicateGroup]
+
+
 class EventList(_Model):
     timezone: str
     range_start: datetime

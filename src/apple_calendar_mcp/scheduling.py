@@ -11,6 +11,9 @@ Free slots (n events, d days):
 
 Conflicts: sort by start and sweep, keeping the events still running;
 each new event overlaps exactly those.                  O(n log n + k)
+
+Duplicates: bucket by (title, start, end, all-day); a bucket holding
+more than one series is a set of copies.                        O(n log n)
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from collections.abc import Iterable
 from datetime import datetime, time, timedelta, tzinfo
 
 from .models import Event, FreeSlot
+from .store import split_event_id
 from .timeutil import ONE_DAY
 
 Interval = tuple[datetime, datetime]
@@ -49,6 +53,37 @@ def find_conflicts(events: Iterable[Event]) -> list[tuple[Event, Event, datetime
             found.append((a, e, e.start, min(a.end, e.end)))
         active.append(e)
     return found
+
+
+def find_duplicates(events: Iterable[Event]) -> list[tuple[list[Event], int]]:
+    """Events that look like copies of each other: ``(copies, repeats)`` per group.
+
+    Copies share the title (case and spacing ignored), start, end and all-day
+    flag, and belong to different series; occurrences of one series are never
+    copies of each other. Canceled events are skipped. When two repeating
+    series are copies, they give one group (their first shared occurrence)
+    and ``repeats`` counts the shared occurrences.
+    """
+    buckets: dict[tuple[str, datetime, datetime, bool], dict[str, Event]] = {}
+    for e in sorted(events, key=lambda e: (e.start, e.end, e.calendar_title, e.id)):
+        if e.status == "canceled":
+            continue
+        key = (" ".join(e.title.casefold().split()), e.start, e.end, e.all_day)
+        buckets.setdefault(key, {}).setdefault(split_event_id(e.id)[0], e)
+
+    groups: list[tuple[list[Event], int]] = []
+    series_group: dict[frozenset[str], int] = {}
+    for by_series in buckets.values():  # insertion order: by start
+        if len(by_series) < 2:
+            continue
+        copies = list(by_series.values())
+        if all(e.is_recurring for e in copies):
+            seen = series_group.setdefault(frozenset(by_series), len(groups))
+            if seen < len(groups):
+                groups[seen] = (groups[seen][0], groups[seen][1] + 1)
+                continue
+        groups.append((copies, 1))
+    return groups
 
 
 def busy_time(events: Iterable[Event], window: Interval) -> timedelta:

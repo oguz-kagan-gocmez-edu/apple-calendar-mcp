@@ -40,6 +40,7 @@ from .test_service import TestCreate as _TestCreate
 
 # Re-run the service scenarios against CalDAV (pytest collects imported classes).
 from .test_service import (  # noqa: F401
+    TestDuplicates,
     TestQueries,
     TestRecurring,
     TestUpdate,

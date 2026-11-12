@@ -263,6 +263,7 @@ describe("mcp", () => {
       find_free_slots: true,
       agenda: true,
       find_conflicts: true,
+      find_duplicates: true,
       create_event: false,
       update_event: false,
       delete_event: false,

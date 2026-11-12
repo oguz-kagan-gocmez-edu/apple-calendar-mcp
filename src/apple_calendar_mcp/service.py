@@ -32,6 +32,8 @@ from .models import (
     CreateChange,
     DeleteChange,
     DeleteResult,
+    DuplicateGroup,
+    DuplicateResult,
     Event,
     EventDraft,
     EventList,
@@ -44,7 +46,7 @@ from .models import (
     TimeContext,
     UndoResult,
 )
-from .scheduling import busy_time, find_conflicts, find_free_slots
+from .scheduling import busy_time, find_conflicts, find_duplicates, find_free_slots
 from .store import CalendarError, CalendarStore, InvalidRequestError
 from .timeutil import ONE_DAY, is_date_only, parse_clock, parse_datetime, start_of_day, tz_name
 
@@ -267,6 +269,31 @@ class CalendarService:
             count=min(len(pairs), limit),
             truncated=len(pairs) > limit,
             conflicts=pairs[:limit],
+        )
+
+    def find_duplicates(
+        self, start: str, end: str, calendar_ids: list[str] | None = None, limit: int = 100
+    ) -> DuplicateResult:
+        s, e = self._range(start, end)
+        limit = self._limit(limit)
+        groups = [
+            DuplicateGroup(
+                title=copies[0].title,
+                start=copies[0].start,
+                end=copies[0].end,
+                all_day=copies[0].all_day,
+                repeats=repeats,
+                events=[EventRef.of(c) for c in copies],
+            )
+            for copies, repeats in find_duplicates(self.store.list_events(s, e, calendar_ids or None))
+        ]
+        return DuplicateResult(
+            timezone=tz_name(self.tz),
+            range_start=s,
+            range_end=e,
+            count=min(len(groups), limit),
+            truncated=len(groups) > limit,
+            groups=groups[:limit],
         )
 
     def agenda(
