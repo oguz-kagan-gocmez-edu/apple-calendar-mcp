@@ -1,12 +1,14 @@
 """iCalendar export and import: the parser, the service and the MCP tools."""
 
+import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 from mcp.client.client import Client
 
-from apple_calendar_mcp.ics import IcsEvent, parse_ics
+from apple_calendar_mcp.ics import IcsEvent, parse_ics, windows_zones
 from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.models import Recurrence
 from apple_calendar_mcp.server import build_server
@@ -39,6 +41,88 @@ def why(event: str) -> str:
 
 
 # ------------------------------------------------------------------ parser
+def zone_def(tzid: str, body: str) -> str:
+    return f"BEGIN:VTIMEZONE\r\nTZID:{tzid}\r\n{body}END:VTIMEZONE\r\n"
+
+
+def with_zones(zones: str, event: str) -> IcsEvent:
+    text = cal(event).replace("PRODID:-//test//EN\r\n", f"PRODID:-//test//EN\r\n{zones}")
+    events, skipped = parse_ics(text, IST)
+    assert skipped == [], skipped
+    return events[0]
+
+
+class TestOutlook:
+    """Files from Outlook and Teams: Windows zone names and meeting links."""
+
+    def test_windows_zone_names(self) -> None:
+        e = one("SUMMARY:a\r\nDTSTART;TZID=W. Europe Standard Time:20261103T090000\r\n")
+        assert e.start == at(3, 11)  # Berlin is UTC+1 in November, Istanbul UTC+3
+        quoted = one('SUMMARY:a\r\nDTSTART;TZID="Turkey Standard Time":20261103T090000\r\n')
+        assert quoted.start == at(3, 9)
+        assert one("SUMMARY:a\r\nDTSTART;TZID=pacific standard time:20261103T090000\r\n").start == at(3, 20)
+
+    def test_the_zone_table_is_valid_and_shared_with_the_worker(self) -> None:
+        table = windows_zones()
+        assert len(table) > 130 and table["Turkey Standard Time"] == "Europe/Istanbul"
+        for iana in table.values():
+            ZoneInfo(iana)
+        worker = Path(__file__).resolve().parent.parent / "worker" / "src" / "windows-zones.json"
+        assert json.loads(worker.read_text("utf-8")) == table
+
+    def test_zones_the_file_defines(self) -> None:
+        lic = zone_def("Custom 1", "X-LIC-LOCATION:Europe/Berlin\r\n")
+        e = with_zones(lic, "SUMMARY:a\r\nDTSTART;TZID=Custom 1:20261103T090000\r\n")
+        assert e.start == at(3, 11)
+        fixed = zone_def(
+            "(UTC+03:00) Istanbul",
+            "BEGIN:STANDARD\r\nDTSTART:16010101T000000\r\nTZOFFSETFROM:+0300\r\nTZOFFSETTO:+0300\r\nEND:STANDARD\r\n",
+        )
+        e = with_zones(fixed, 'SUMMARY:a\r\nDTSTART;TZID="(UTC+03:00) Istanbul":20261103T090000\r\n')
+        assert e.start == at(3, 9)
+
+    def test_a_defined_zone_with_daylight_time_is_still_skipped(self) -> None:
+        dst = zone_def(
+            "Somewhere",
+            "BEGIN:STANDARD\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\n"
+            "BEGIN:DAYLIGHT\r\nTZOFFSETTO:+0200\r\nEND:DAYLIGHT\r\n",
+        )
+        text = cal("SUMMARY:a\r\nDTSTART;TZID=Somewhere:20261103T090000\r\n").replace(
+            "PRODID:-//test//EN\r\n", f"PRODID:-//test//EN\r\n{dst}"
+        )
+        events, skipped = parse_ics(text, IST)
+        assert events == [] and "isn't one this server knows" in skipped[0].reason
+
+    def test_meeting_links_become_the_url(self) -> None:
+        teams = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%7d"
+        e = one(
+            "SUMMARY:Sync\r\nDTSTART:20261103T060000Z\r\n"
+            f"X-MICROSOFT-SKYPETEAMSMEETINGURL:{teams}\r\n"
+            "DESCRIPTION:Join here\\n________________\r\n"
+        )
+        assert e.url == teams
+        zoom = one(
+            "SUMMARY:Call\r\nDTSTART:20261103T060000Z\r\n"
+            "DESCRIPTION:Join Zoom Meeting\\n<https://us02web.zoom.us/j/81234567890?pwd=abc>.\\nID: 812\r\n"
+        )
+        assert zoom.url == "https://us02web.zoom.us/j/81234567890?pwd=abc"
+        assert one(
+            "SUMMARY:x\r\nDTSTART:20261103T060000Z\r\nLOCATION:https://meet.google.com/abc-defg-hij\r\n"
+        ).url == ("https://meet.google.com/abc-defg-hij")
+
+    def test_an_existing_url_is_kept_and_the_link_goes_in_the_notes(self) -> None:
+        e = one(
+            "SUMMARY:x\r\nDTSTART:20261103T060000Z\r\nURL:https://example.com/agenda\r\n"
+            "X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\nDESCRIPTION:Agenda attached\r\n"
+        )
+        assert e.url == "https://example.com/agenda"
+        assert e.notes == "Join: https://meet.google.com/abc-defg-hij\n\nAgenda attached"
+
+    def test_ordinary_links_are_not_meeting_links(self) -> None:
+        e = one("SUMMARY:x\r\nDTSTART:20261103T060000Z\r\nDESCRIPTION:See https://zoom.us/pricing\r\n")
+        assert e.url is None
+
+
 class TestParse:
     def test_time_forms(self) -> None:
         assert one("SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nDTEND:20261103T070000Z\r\n").start == at(3, 9)
@@ -108,7 +192,7 @@ class TestParse:
         [
             ("SUMMARY:a\r\n", "no start time"),
             ("SUMMARY:a\r\nDTSTART:tomorrow\r\n", "can't be read"),
-            ("SUMMARY:a\r\nDTSTART;TZID=W. Europe Standard Time:20261103T090000\r\n", "time zone"),
+            ("SUMMARY:a\r\nDTSTART;TZID=Middle Earth Time:20261103T090000\r\n", "time zone"),
             ("SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nDTEND:20261103T050000Z\r\n", "ends before"),
             ("SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nSTATUS:CANCELLED\r\n", "canceled"),
             ("SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nRECURRENCE-ID:20261103T060000Z\r\n", "changed"),
