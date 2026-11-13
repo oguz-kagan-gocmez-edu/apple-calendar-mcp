@@ -77,6 +77,7 @@ from .store import (
     CalendarStore,
     InvalidRequestError,
     NotFoundError,
+    ReadOnlyCalendarError,
     make_event_id,
     split_event_id,
 )
@@ -895,9 +896,9 @@ class CalendarService:
         return keys
 
     def import_ics(
-        self, ics: str, calendar_id: str | None = None, skip_existing: bool = True
+        self, ics: str, calendar_id: str | None = None, skip_existing: bool = True, dry_run: bool = False
     ) -> ImportResult:
-        """Add the events in iCalendar text, as one undoable change."""
+        """Add the events in iCalendar text, as one undoable change (or only preview them)."""
         if len(ics) > MAX_ICS_CHARS:
             raise InvalidRequestError("The iCalendar text is too large; split the file.")
         with _as_invalid_request():
@@ -929,6 +930,15 @@ class CalendarService:
                     seen.add(key)
                     fresh.append((item, draft))
             plan = fresh
+
+        if dry_run:
+            cal = self._target_calendar(calendar_id) if plan else None
+            return ImportResult(
+                change_id=None,
+                dry_run=True,
+                imported=[EventRef.of(self._preview_created(d, cal)) for _, d in plan if cal],
+                skipped=skipped,
+            )
 
         steps: list[Step] = []
         for item, draft in plan:
@@ -996,8 +1006,11 @@ class CalendarService:
         self.journal.remove(rec.id)
         return UndoResult(change_id=rec.id, summary=rec.summary, restored=restored[::-1], removed_ids=removed)
 
-    def apply_changes(self, changes: list[BatchChange]) -> BatchResult:
-        """Apply creates, updates and deletes all-or-nothing, as one undoable change."""
+    def apply_changes(self, changes: list[BatchChange], dry_run: bool = False) -> BatchResult:
+        """Apply creates, updates and deletes all-or-nothing, as one undoable change.
+
+        With ``dry_run`` everything is checked the same way, but nothing is written: the
+        result shows each event as it would look afterwards."""
         if not 1 <= len(changes) <= MAX_BATCH:
             raise InvalidRequestError(f"Pass between 1 and {MAX_BATCH} changes.")
         ids = [c.event_id for c in changes if not isinstance(c, CreateChange)]
@@ -1025,6 +1038,9 @@ class CalendarService:
             except CalendarError as exc:
                 raise type(exc)(f"Change {n} ({c.action}): {exc} Nothing was changed.") from exc
 
+        if dry_run:
+            return BatchResult(change_id=None, dry_run=True, results=self._preview_batch(plan))
+
         # 2. Apply in order; on failure, roll back what was done.
         steps: list[Step] = []
         for n, (c, before, payload) in enumerate(plan, 1):
@@ -1051,6 +1067,84 @@ class CalendarService:
         rec = self._record(steps)
         outcomes = [ChangeOutcome(action=s.action, event=s.event) for s in steps]
         return BatchResult(change_id=rec.id, results=outcomes)
+
+    # ------------------------------------------------------------ previews
+    def _target_calendar(self, calendar_id: str | None, cals: list[Calendar] | None = None) -> Calendar:
+        """The calendar a new event would go to, checked the way a write would be."""
+        if cals is None:
+            cals = self.store.list_calendars()
+        if calendar_id is None:
+            cal = next((c for c in cals if c.is_default), None)
+            if cal is None:
+                raise InvalidRequestError("There is no default calendar; pass calendar_id.")
+        else:
+            cal = next((c for c in cals if c.id == calendar_id), None)
+            if cal is None:
+                raise NotFoundError(f"No calendar with id '{calendar_id}'. Call list_calendars.")
+        if not cal.writable:
+            raise ReadOnlyCalendarError(f"The calendar '{cal.title}' is read-only.")
+        return cal
+
+    @staticmethod
+    def _preview_created(draft: EventDraft, cal: Calendar) -> Event:
+        return Event(
+            id="",
+            calendar_id=cal.id,
+            calendar_title=cal.title,
+            title=draft.title,
+            start=draft.start,
+            end=draft.end,
+            all_day=draft.all_day,
+            location=draft.location or None,
+            notes=draft.notes or None,
+            url=draft.url or None,
+            is_recurring=draft.recurrence is not None,
+            recurrence=draft.recurrence,
+            alarms_minutes_before=list(draft.alarms_minutes_before),
+            availability=draft.availability or "busy",
+        )
+
+    def _preview_updated(self, before: Event, patch: EventPatch, cals: list[Calendar]) -> Event:
+        changes: dict[str, object] = {
+            k: v
+            for k, v in patch.model_dump(exclude={"remove_recurrence", "calendar_id"}).items()
+            if v is not None
+        }
+        for text in ("location", "notes", "url"):
+            if changes.get(text) == "":
+                changes[text] = None
+        if patch.calendar_id is not None:
+            cal = self._target_calendar(patch.calendar_id, cals)
+            changes |= {"calendar_id": cal.id, "calendar_title": cal.title}
+        if patch.remove_recurrence:
+            changes |= {"recurrence": None, "is_recurring": False}
+        return before.model_copy(update=changes)
+
+    def _preview_batch(
+        self, plan: list[tuple[BatchChange, Event | None, EventDraft | EventPatch | None]]
+    ) -> list[ChangeOutcome]:
+        cals = self.store.list_calendars()
+        by_id = {cal.id: cal for cal in cals}
+        out: list[ChangeOutcome] = []
+        for n, (c, before, payload) in enumerate(plan, 1):
+            try:
+                if isinstance(c, CreateChange):
+                    assert isinstance(payload, EventDraft)
+                    event = self._preview_created(payload, self._target_calendar(payload.calendar_id, cals))
+                else:
+                    assert before is not None
+                    cal = by_id.get(before.calendar_id)
+                    if cal is not None and not cal.writable:
+                        raise ReadOnlyCalendarError(f"The calendar '{cal.title}' is read-only.")
+                    if isinstance(c, DeleteChange):
+                        event = before
+                    else:
+                        assert isinstance(payload, EventPatch)
+                        event = self._preview_updated(before, payload, cals)
+            except CalendarError as exc:
+                raise type(exc)(f"Change {n} ({c.action}): {exc} Nothing was changed.") from exc
+            out.append(ChangeOutcome(action=c.action, event=event))
+        return out
 
     def _rollback(self, steps: list[Step]) -> list[str]:
         failed: list[str] = []

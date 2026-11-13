@@ -200,6 +200,20 @@ describe("import", () => {
       service = new CalendarService(new MemoryStore(), IST, () => NOW);
     });
 
+    it("previews an import without adding anything", async () => {
+      await service.createEvent({ title: "Kickoff", start: "2026-11-03T10:00", calendar_id: "work" });
+      const r = await service.importIcs(FILE, "work", true, true);
+      expect([r.dry_run, r.change_id]).toEqual([true, null]);
+      expect(r.imported.map((e) => [e.id, e.title, e.calendar_title])).toEqual([
+        ["", "Standup", "Work"],
+        ["", "Offsite", "Work"],
+      ]);
+      expect(new Set(r.skipped.map((s) => s.title))).toEqual(new Set(["Board", "Kickoff"]));
+      expect((await service.listEvents(...NOVEMBER)).events.map((e) => e.title)).toEqual(["Kickoff"]);
+      expect(await service.listChanges()).toHaveLength(1); // only the create above
+      await expect(service.importIcs(FILE, "nowhere", true, true)).rejects.toThrow(/nowhere/);
+    });
+
     it("skips events already there, and copies inside the file", async () => {
       await service.createEvent({ title: "kickoff", start: "2026-11-03T10:00" });
       const fresh = "SUMMARY:New\r\nDTSTART;TZID=Europe/Istanbul:20261103T120000\r\n";

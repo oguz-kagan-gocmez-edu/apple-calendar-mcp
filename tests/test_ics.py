@@ -11,7 +11,7 @@ from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.models import Recurrence
 from apple_calendar_mcp.server import build_server
 from apple_calendar_mcp.service import MAX_IMPORT_EVENTS, CalendarService
-from apple_calendar_mcp.store import InvalidRequestError
+from apple_calendar_mcp.store import CalendarError, InvalidRequestError
 
 from .conftest import IST, NOW
 
@@ -228,6 +228,20 @@ class TestImport:
         assert [e.start.day for e in events if e.title == "Standup"] == [4, 6, 7]  # 5 Nov was removed
         offsite = next(e for e in events if e.title == "Offsite")
         assert (offsite.start, offsite.end, offsite.all_day) == (at(12, 0), at(14, 0), True)
+
+    def test_dry_run_lists_without_adding(self, service: CalendarService) -> None:
+        service.create_event("Kickoff", "2026-11-03T10:00", end="2026-11-03T11:00", calendar_id="work")
+        r = service.import_ics(FILE, calendar_id="work", dry_run=True)
+        assert r.dry_run and r.change_id is None
+        assert [(e.id, e.title, e.calendar_title) for e in r.imported] == [
+            ("", "Standup", "Work"),
+            ("", "Offsite", "Work"),
+        ]
+        assert {s.title for s in r.skipped} == {"Board", "Kickoff"}
+        assert [e.title for e in service.list_events("2026-11-01", "2026-11-30").events] == ["Kickoff"]
+        assert len(service.list_changes()) == 1  # only the create above
+        with pytest.raises(CalendarError, match="read-only"):
+            service.import_ics(FILE, calendar_id="holidays", dry_run=True)
 
     def test_whole_import_is_one_undoable_change(self, service: CalendarService) -> None:
         r = service.import_ics(FILE)
