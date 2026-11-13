@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "apple-calendar-mcp",
   "display_name": "Apple Calendar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read and manage Apple Calendar and Reminders on your Mac: events, free time, conflicts, undo.",
   "long_description": "Works with every account synced into macOS Calendar (iCloud, Google, Exchange and others) through Apple's EventKit, locally on your Mac. Find free time, check your agenda and conflicts, create and move events (including one occurrence of a repeating event), preview and undo changes, import and export .ics files, and manage reminders.\n\nOn first start it installs a small helper app at ~/Applications/Apple Calendar MCP.app. macOS then asks once for access to \"Apple Calendar MCP\": choose Allow Full Access for Calendar (and for Reminders, if you use them). Nothing leaves your Mac.",
   "author": {

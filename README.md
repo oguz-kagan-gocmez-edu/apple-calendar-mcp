@@ -5,11 +5,11 @@
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude **read and manage your Apple Calendar**: list your schedule, find free time, and create, move or delete events, including recurring ones.
+A [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude **read and manage your Apple Calendar and Reminders**: list your schedule, find free time, and create, move or delete events, including recurring ones. Larger changes can be previewed first and undone afterwards.
 
 It talks to macOS through Apple's **EventKit** framework. That is the same database Calendar.app uses, so every account synced on your Mac (iCloud, Google, Exchange, your university's Outlook) shows up through one interface. Nothing leaves your machine except what Claude reads in the conversation.
 
-It can also run as a **remote connector** for claude.ai on the web and on your phone: your own small server that talks to iCloud over CalDAV and signs Claude in with OAuth. See [Remote connector](#remote-connector-claudeai-web-and-mobile).
+In Claude Desktop it installs with one click as an [extension](#claude-desktop-extension-one-click). It can also run as a **remote connector** for claude.ai on the web and on your phone: your own small server that talks to iCloud over CalDAV and signs Claude in with OAuth. See [Remote connector](#remote-connector-claudeai-web-and-mobile).
 
 <!-- mcp-name: io.github.oguz-kagan-gocmez-edu/apple-calendar-mcp -->
 
@@ -58,7 +58,8 @@ Other parts of the design:
 
 - **Free/busy that matches reality.** Free time, busy minutes and conflicts ignore all-day events, events marked *free*, canceled events and invitations you declined. Invitations you haven't answered still count as busy, and `agenda` lists them separately.
 - **Tool annotations.** Each tool is marked read-only or destructive, so clients can ask you before they change anything.
-- **`--read-only` mode.** Runs the server without the write tools at all.
+- **Read-only mode.** `--read-only` (or `APPLE_CALENDAR_READ_ONLY=1`, or the switch in the extension's settings) runs the server without the write tools at all.
+- **Preview first.** `apply_changes` and `import_ics` take `dry_run`: the same checks as the real call (including read-only and unknown calendars), and the events as they would look, without writing anything. Claude is told to show the preview before larger changes.
 - **Answer invitations.** On the iCloud (CalDAV) backend and the remote connector, `respond_to_invitation` sets your reply and iCloud tells the organizer. It needs the sign-in name to be the email address the invitation was sent to. EventKit gives apps no way to reply, so on the Mac backend the tool is not offered; answer in the Calendar app there. Replies are not in the undo log, because the organizer has already been told.
 - **Reminders, on the Mac.** The reminder tools use Apple Reminders through EventKit, with their own macOS permission that is asked for only the first time a reminder tool is used. A due time also sets an alert then, as the Reminders app does. iCloud doesn't serve reminders over CalDAV any more, so the CalDAV backend and the remote connector don't offer these tools. Reminder changes are not in the undo log. `--no-reminders` (or `APPLE_CALENDAR_NO_REMINDERS=1`) leaves the tools out, and the per-calendar access options apply to reminder lists by id or title too.
 - **Undo that won't clobber anything.** Every write is logged with the event before and after. Undo restores it exactly, or refuses: if the event was edited again since, or if the change can't be reversed exactly (edits to several occurrences of a repeating event, a deleted occurrence, a deleted invitation whose invites can't be resent). The log keeps the last 50 changes, in memory on your Mac.
@@ -100,8 +101,8 @@ flowchart LR
 ## Requirements
 
 - macOS 13 or later (macOS 14+ uses the newer full-access permission API)
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- Claude Desktop or Claude Code
+- Claude Desktop, Claude Code, or another MCP client
+- For the Claude Desktop extension, nothing else: Claude Desktop brings uv and Python. For the other setups, Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 
 ## Claude Desktop extension (one click)
 
@@ -201,6 +202,8 @@ apple-calendar-mcp install-app [--dest PATH] [--from-source]
 apple-calendar-mcp --backend caldav doctor     # iCloud over CalDAV (CALDAV_* env vars)
 apple-calendar-mcp serve-http [--host H] [--port P]   # remote connector, see below
 ```
+
+`--read-only` and `--no-reminders` can also be set with `APPLE_CALENDAR_READ_ONLY=1` and `APPLE_CALENDAR_NO_REMINDERS=1`, which is how the Claude Desktop extension passes its settings.
 
 ### Choosing which calendars Claude can touch
 
@@ -365,7 +368,7 @@ npx @modelcontextprotocol/inspector uv run apple-calendar-mcp --backend memory -
 
 ```bash
 uv sync --group dev --extra remote
-uv run pytest --cov=apple_calendar_mcp   # 190 tests (CalDAV ones run against a local Radicale server)
+uv run pytest --cov=apple_calendar_mcp   # about 400 tests (CalDAV ones run against a local Radicale server)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src                          # strict
 ```
@@ -379,7 +382,7 @@ The test suite has six layers:
 | Protocol | `test_server.py` | Full lifecycle over a real MCP client session, schemas, annotations, error mapping |
 | Backend | `test_eventkit_mapping.py`, `test_caldav_store.py` | EventKit on a fake PyObjC layer. CalDAV against a real Radicale server, re-running every service scenario plus iCalendar mapping (overrides, EXDATE, all-day, alarms, RRULE) |
 | Remote | `test_remote_auth.py` | The whole OAuth flow (registration, login, PKCE, refresh rotation, revocation, expiry, lockout) and tool calls over streamable HTTP |
-| CLI | `test_cli.py`, `test_macos_app.py` | Backend selection, `--read-only` and `--demo`, `doctor` output, and building the helper app and relaunching through it |
+| CLI | `test_cli.py`, `test_macos_app.py`, `test_mcpb.py` | Backend selection, `--read-only` and `--demo`, `doctor` output, building, updating and relaunching through the helper app, and the extension manifest staying in step with the server |
 
 The Cloudflare Worker has its own TypeScript suite (`cd worker && npm test`): the same service scenarios against Radicale, recurrence and DST checks, a CPU budget check (the free plan allows 10 ms of CPU per request), and the OAuth flow and MCP tools inside `workerd`, the real Workers runtime.
 
@@ -399,6 +402,7 @@ CI cannot click "Allow" in a permission dialog. Before a release, run through th
 4. Create a weekly test event. Move one occurrence (`this`), then rename the rest (`future`), and check Calendar.app.
 5. Delete the series (`all`).
 6. `doctor` asks for Reminders access and lists your reminder lists. Ask Claude to add a reminder for tomorrow at 9:00: it appears in Reminders.app with an alert, then complete and delete it.
+7. After the release, install the `.mcpb` from the GitHub release in Claude Desktop, turn on **Read only** in its settings, and ask for this week's events: they appear, and no write tools are offered.
 
 ## Limitations and roadmap
 
