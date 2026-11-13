@@ -2,19 +2,19 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.oguz-kagan-gocmez-edu/apple-calendar-mcp",
   "title": "Apple Calendar (EventKit)",
-  "description": "Read and manage Apple Calendar on macOS via EventKit: events, free slots, recurring edits.",
+  "description": "Apple Calendar and Reminders on macOS via EventKit: free time, recurring edits, undo.",
   "repository": {
     "url": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp",
     "source": "github"
   },
   "websiteUrl": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#readme",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "apple-calendar-eventkit-mcp",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       }

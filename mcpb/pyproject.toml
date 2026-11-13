@@ -2,9 +2,9 @@
 # the server itself comes from PyPI, so the bundle carries no code of its own.
 [project]
 name = "apple-calendar-mcp-extension"
-version = "0.3.0"
+version = "0.4.0"
 requires-python = ">=3.11"
-dependencies = ["apple-calendar-eventkit-mcp==0.3.0"]
+dependencies = ["apple-calendar-eventkit-mcp==0.4.0"]
 
 [tool.uv]
 package = false

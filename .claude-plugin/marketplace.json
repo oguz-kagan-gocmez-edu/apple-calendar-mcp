@@ -9,7 +9,7 @@
     {
       "name": "apple-calendar-mcp",
       "source": "./",
-      "description": "Read and manage the calendars on your Mac through EventKit. Runs locally."
+      "description": "Read and manage the calendars and reminders on your Mac through EventKit. Runs locally."
     }
   ]
 }
