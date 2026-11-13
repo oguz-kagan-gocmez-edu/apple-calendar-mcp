@@ -1,7 +1,7 @@
 {
   "name": "apple-calendar-mcp",
   "displayName": "Apple Calendar for Mac",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Read and manage the calendars and reminders on your Mac (iCloud, Google, Exchange) through EventKit: agenda, free time, conflicts, create and move events, preview and undo changes. Runs locally; unofficial, not affiliated with Apple.",
   "author": {
     "name": "Oğuz Kağan Göçmez",
