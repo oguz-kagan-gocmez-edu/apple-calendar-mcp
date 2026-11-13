@@ -8,11 +8,18 @@
  * Import reads the subset of RFC 5545 that maps onto this server's events.
  * Anything it can't represent faithfully is reported as skipped with the
  * reason, never imported half-right.
+ *
+ * Windows zone names from Outlook and Teams are mapped to IANA zones with
+ * CLDR's table (shared with the Python server). A zone the file only defines
+ * itself is used when it names an IANA zone (X-LIC-LOCATION) or has a single
+ * whole-hour offset. Teams, Zoom, Google Meet and Webex join links become
+ * the event's URL.
  */
 
 import { type Availability, type Event, type Recurrence, RecurrenceSchema, WEEKDAYS } from "./models";
 import { splitEventId } from "./store";
 import { DAY, HOUR, MINUTE, Zone, formatDate } from "./time";
+import WINDOWS_ZONES from "./windows-zones.json";
 
 const PRODID = "-//apple-calendar-mcp//Export//EN";
 const BYDAY = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
@@ -50,6 +57,61 @@ export interface IcsSkip {
 
 /** This VEVENT can't be imported faithfully; the message says why. */
 class Unsupported extends Error {}
+
+/** What a file's own VTIMEZONE says about a zone. */
+interface ZoneDef {
+  /** X-LIC-LOCATION: an IANA name, from some calendar apps. */
+  location: string | null;
+  /** [STANDARD or DAYLIGHT, TZOFFSETTO] */
+  offsets: [string, string][];
+}
+type ZoneDefs = Map<string, ZoneDef>;
+
+const WINDOWS = WINDOWS_ZONES as Record<string, string>;
+const WINDOWS_FOLDED = new Map(Object.entries(WINDOWS).map(([k, v]) => [k.toLowerCase(), v]));
+
+/** A zone with one offset all year, as Etc/GMT±N (whole hours only). */
+function fixedZone(offsets: [string, string][]): string | null {
+  if (!offsets.length || offsets.some(([kind]) => kind !== "STANDARD")) return null;
+  const values = new Set(offsets.map(([, v]) => v.trim()));
+  if (values.size !== 1) return null;
+  const m = /^([+-])(\d{2})(\d{2})(?:\d{2})?$/.exec([...values][0]!);
+  if (!m || m[3] !== "00") return null;
+  const hours = Number(m[2]);
+  if (hours === 0) return "Etc/UTC";
+  return `Etc/GMT${m[1] === "+" ? "-" : "+"}${hours}`; // Etc/GMT signs are inverted
+}
+
+/** The zone a TZID names: IANA, Windows, or the file's own definition. */
+function zoneFor(tzid: string, defined: ZoneDefs): Zone {
+  const name = tzid.trim().replace(/^"|"$/g, "").replace(/^\/+/, "");
+  const candidates = [name, WINDOWS[name] ?? WINDOWS_FOLDED.get(name.toLowerCase())];
+  const own = defined.get(tzid);
+  if (own) candidates.push(own.location ?? undefined, fixedZone(own.offsets) ?? undefined);
+  for (const c of candidates) if (c && Zone.isValid(c)) return new Zone(c);
+  throw new Unsupported(`its time zone '${tzid.slice(0, 40)}' isn't one this server knows`);
+}
+
+const MEETING_PROPS = [
+  "X-MICROSOFT-SKYPETEAMSMEETINGURL",
+  "X-MICROSOFT-ONLINEMEETINGEXTERNALLINK",
+  "X-GOOGLE-CONFERENCE",
+  "CONFERENCE",
+];
+const MEETING_URL = new RegExp(
+  String.raw`https://(?:[\w-]+\.)*(?:zoom\.us/(?:j|my|w)/|teams\.microsoft\.com/l/meetup-join/|teams\.live\.com/meet/` +
+    String.raw`|meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}|webex\.com/(?:meet|join)/|[\w-]+\.webex\.com/)[^\s<>"'\]]*`,
+  "i",
+);
+
+/** The first Teams, Zoom, Google Meet or Webex join link in ``texts``. */
+export function meetingLink(...texts: (string | null)[]): string | null {
+  for (const text of texts) {
+    const m = MEETING_URL.exec(text ?? "");
+    if (m) return m[0].replace(/[.,;:)]+$/, "");
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------- writing
 function escapeText(text: string): string {
@@ -150,13 +212,16 @@ interface RawEvent {
   alarms: Prop[][];
 }
 
-function vevents(text: string): RawEvent[] {
+function vevents(text: string): [RawEvent[], ZoneDefs] {
   const lines: string[] = [];
   for (const raw of text.split(/\r\n|\n|\r/)) {
     if ((raw.startsWith(" ") || raw.startsWith("\t")) && lines.length) lines[lines.length - 1] += raw.slice(1);
     else if (raw.trim()) lines.push(raw);
   }
   const found: RawEvent[] = [];
+  const zones: ZoneDefs = new Map();
+  let zoneId: string | null = null;
+  let zoneDef: ZoneDef | null = null;
   const stack: string[] = [];
   const path = () => stack.join("/");
   let sawCalendar = false;
@@ -172,26 +237,33 @@ function vevents(text: string): RawEvent[] {
       stack.push(kind);
       sawCalendar ||= path() === "VCALENDAR";
       if (path() === "VCALENDAR/VEVENT") found.push({ props: [], alarms: [] });
+      else if (path() === "VCALENDAR/VTIMEZONE") [zoneId, zoneDef] = [null, { location: null, offsets: [] }];
       else if (path() === "VCALENDAR/VEVENT/VALARM") found[found.length - 1]!.alarms.push([]);
     } else if (name === "END") {
       if (stack[stack.length - 1] !== kind) {
         throw new RangeError("The iCalendar text is damaged: BEGIN and END lines don't match.");
       }
+      if (path() === "VCALENDAR/VTIMEZONE" && zoneId && zoneDef) zones.set(zoneId, zoneDef);
       stack.pop();
     } else if (path() === "VCALENDAR/VEVENT") {
       found[found.length - 1]!.props.push(parsed);
     } else if (path() === "VCALENDAR/VEVENT/VALARM") {
       const alarms = found[found.length - 1]!.alarms;
       alarms[alarms.length - 1]!.push(parsed);
+    } else if (path() === "VCALENDAR/VTIMEZONE" && zoneDef) {
+      if (name === "TZID") zoneId = value.trim();
+      else if (name === "X-LIC-LOCATION") zoneDef.location = value.trim();
+    } else if (/^VCALENDAR\/VTIMEZONE\/(STANDARD|DAYLIGHT)$/.test(path()) && zoneDef && name === "TZOFFSETTO") {
+      zoneDef.offsets.push([stack[stack.length - 1]!, value]);
     }
   }
   if (!sawCalendar) throw new RangeError(NOT_ICS);
   if (stack.length) throw new RangeError("The iCalendar text is cut off: a BEGIN has no END.");
-  return found;
+  return [found, zones];
 }
 
 /** A DATE or DATE-TIME value as an instant, and whether it was a date. */
-function when(params: Params, value: string, zone: Zone): [number, boolean] {
+function when(params: Params, value: string, zone: Zone, defined: ZoneDefs = new Map()): [number, boolean] {
   const v = value.trim();
   const unreadable = () => new Unsupported(`it has a time that can't be read ('${v.slice(0, 30)}')`);
   const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})([Zz])?)?$/.exec(v);
@@ -207,11 +279,7 @@ function when(params: Params, value: string, zone: Zone): [number, boolean] {
   if (m[7]) return [check.getTime(), false];
   const tzid = params.TZID;
   if (!tzid) return [zone.instant(wall), false]; // floating: the user's own zone
-  const name = tzid.replace(/^\/+/, "");
-  if (!Zone.isValid(name)) {
-    throw new Unsupported(`its time zone '${tzid.slice(0, 40)}' isn't a standard zone name`);
-  }
-  return [new Zone(name).instant(wall), false];
+  return [zoneFor(tzid, defined).instant(wall), false];
 }
 
 /** Milliseconds, or null if the value isn't a duration. */
@@ -271,7 +339,7 @@ function rule(value: string, start: number, zone: Zone): Recurrence {
   return checked.data as Recurrence;
 }
 
-function event({ props, alarms }: RawEvent, zone: Zone): IcsEvent {
+function event({ props, alarms }: RawEvent, zone: Zone, defined: ZoneDefs): IcsEvent {
   const first = new Map<string, [Params, string]>();
   for (const [name, params, value] of props) if (!first.has(name)) first.set(name, [params, value]);
   const text = (name: string) => unescapeText(first.get(name)?.[1] ?? "").trim() || null;
@@ -283,12 +351,12 @@ function event({ props, alarms }: RawEvent, zone: Zone): IcsEvent {
   const dtstart = first.get("DTSTART");
   if (!dtstart) throw new Unsupported("it has no start time");
 
-  const [start, allDay] = when(dtstart[0], dtstart[1], zone);
+  const [start, allDay] = when(dtstart[0], dtstart[1], zone, defined);
   const nextDay = () => zone.startOfDay({ ...zone.date(start + 36 * HOUR) });
   let end: number;
   const dtend = first.get("DTEND");
   if (dtend) {
-    end = when(dtend[0], dtend[1], zone)[0];
+    end = when(dtend[0], dtend[1], zone, defined)[0];
   } else if (first.has("DURATION")) {
     const span = duration(first.get("DURATION")![1]);
     if (span === null) throw new Unsupported("its duration can't be read");
@@ -305,7 +373,7 @@ function event({ props, alarms }: RawEvent, zone: Zone): IcsEvent {
   if (recurrence) {
     for (const [name, params, value] of props) {
       if (name !== "EXDATE") continue;
-      for (const v of value.split(",")) if (v.trim()) exdates.add(when(params, v, zone)[0]);
+      for (const v of value.split(",")) if (v.trim()) exdates.add(when(params, v, zone, defined)[0]);
     }
     if (exdates.has(start)) throw new Unsupported("its first occurrence was removed, which isn't supported");
   }
@@ -318,14 +386,20 @@ function event({ props, alarms }: RawEvent, zone: Zone): IcsEvent {
     if (before !== null && before <= 0) minutes.add(Math.floor(-before / MINUTE));
   }
 
+  let notes = text("DESCRIPTION");
+  let url = text("URL");
+  const join = meetingLink(...MEETING_PROPS.map(text), url, text("LOCATION"), notes);
+  if (join && !url) url = join;
+  else if (join && join !== url && !(notes ?? "").includes(join)) notes = `Join: ${join}` + (notes ? `\n\n${notes}` : "");
+
   return {
     title: text("SUMMARY") ?? "",
     start,
     end,
     all_day: allDay,
     location: text("LOCATION"),
-    notes: text("DESCRIPTION"),
-    url: text("URL"),
+    notes,
+    url,
     alarms: [...minutes].sort((a, b) => b - a),
     recurrence,
     availability: upper("TRANSP") === "TRANSPARENT" ? "free" : null,
@@ -341,11 +415,12 @@ function event({ props, alarms }: RawEvent, zone: Zone): IcsEvent {
 export function parseIcs(text: string, zone: Zone): [IcsEvent[], IcsSkip[]] {
   const events: IcsEvent[] = [];
   const skipped: IcsSkip[] = [];
-  for (const raw of vevents(text)) {
+  const [found, defined] = vevents(text);
+  for (const raw of found) {
     const summary = raw.props.find(([name]) => name === "SUMMARY");
     const title = (summary ? unescapeText(summary[2]).trim() : "") || "(no title)";
     try {
-      events.push(event(raw, zone));
+      events.push(event(raw, zone, defined));
     } catch (err) {
       if (!(err instanceof Unsupported)) throw err;
       skipped.push({ title: title.slice(0, 200), reason: `Skipped: ${err.message}.` });

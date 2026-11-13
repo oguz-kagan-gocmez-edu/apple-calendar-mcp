@@ -26,6 +26,60 @@ function why(event: string): string {
   return skipped[0]!.reason;
 }
 
+const withZones = (zones: string, ev: string): IcsEvent => {
+  const [events, skipped] = parseIcs(cal(ev).replace("PRODID:-//test//EN\r\n", `PRODID:-//test//EN\r\n${zones}`), IST);
+  expect(skipped).toEqual([]);
+  return events[0]!;
+};
+const zoneDef = (tzid: string, body: string) => `BEGIN:VTIMEZONE\r\nTZID:${tzid}\r\n${body}END:VTIMEZONE\r\n`;
+
+describe("files from Outlook and Teams", () => {
+  it("maps Windows zone names", () => {
+    expect(one("SUMMARY:a\r\nDTSTART;TZID=W. Europe Standard Time:20261103T090000\r\n").start).toBe(at(3, 11));
+    expect(one('SUMMARY:a\r\nDTSTART;TZID="Turkey Standard Time":20261103T090000\r\n').start).toBe(at(3, 9));
+    expect(one("SUMMARY:a\r\nDTSTART;TZID=pacific standard time:20261103T090000\r\n").start).toBe(at(3, 20));
+  });
+
+  it("uses zones the file defines, but not ones with daylight time", () => {
+    const lic = zoneDef("Custom 1", "X-LIC-LOCATION:Europe/Berlin\r\n");
+    expect(withZones(lic, "SUMMARY:a\r\nDTSTART;TZID=Custom 1:20261103T090000\r\n").start).toBe(at(3, 11));
+    const fixed = zoneDef(
+      "(UTC+03:00) Istanbul",
+      "BEGIN:STANDARD\r\nDTSTART:16010101T000000\r\nTZOFFSETFROM:+0300\r\nTZOFFSETTO:+0300\r\nEND:STANDARD\r\n",
+    );
+    const ev = 'SUMMARY:a\r\nDTSTART;TZID="(UTC+03:00) Istanbul":20261103T090000\r\n';
+    expect(withZones(fixed, ev).start).toBe(at(3, 9));
+    const dst = zoneDef(
+      "Somewhere",
+      "BEGIN:STANDARD\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nTZOFFSETTO:+0200\r\nEND:DAYLIGHT\r\n",
+    );
+    const text = cal("SUMMARY:a\r\nDTSTART;TZID=Somewhere:20261103T090000\r\n").replace(
+      "PRODID:-//test//EN\r\n",
+      `PRODID:-//test//EN\r\n${dst}`,
+    );
+    expect(parseIcs(text, IST)[1][0]!.reason).toContain("isn't one this server knows");
+  });
+
+  it("turns meeting links into the URL, keeping an existing one", () => {
+    const teams = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%7d";
+    expect(one(`SUMMARY:Sync\r\nDTSTART:20261103T060000Z\r\nX-MICROSOFT-SKYPETEAMSMEETINGURL:${teams}\r\n`).url).toBe(teams);
+    const zoom = one(
+      "SUMMARY:Call\r\nDTSTART:20261103T060000Z\r\n" +
+        "DESCRIPTION:Join Zoom Meeting\\n<https://us02web.zoom.us/j/81234567890?pwd=abc>.\\nID: 812\r\n",
+    );
+    expect(zoom.url).toBe("https://us02web.zoom.us/j/81234567890?pwd=abc");
+    const kept = one(
+      "SUMMARY:x\r\nDTSTART:20261103T060000Z\r\nURL:https://example.com/agenda\r\n" +
+        "X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\nDESCRIPTION:Agenda attached\r\n",
+    );
+    expect([kept.url, kept.notes]).toEqual([
+      "https://example.com/agenda",
+      "Join: https://meet.google.com/abc-defg-hij\n\nAgenda attached",
+    ]);
+    expect(one("SUMMARY:x\r\nDTSTART:20261103T060000Z\r\nDESCRIPTION:See https://zoom.us/pricing\r\n").url).toBeNull();
+  });
+});
+
 describe("parseIcs", () => {
   it("reads UTC, zoned and floating times", () => {
     expect(one("SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nDTEND:20261103T070000Z\r\n").start).toBe(at(3, 9));
@@ -88,7 +142,7 @@ describe("parseIcs", () => {
     ["SUMMARY:a\r\n", "no start time"],
     ["SUMMARY:a\r\nDTSTART:tomorrow\r\n", "can't be read"],
     ["SUMMARY:a\r\nDTSTART:20261341T060000Z\r\n", "can't be read"],
-    ["SUMMARY:a\r\nDTSTART;TZID=W. Europe Standard Time:20261103T090000\r\n", "time zone"],
+    ["SUMMARY:a\r\nDTSTART;TZID=Middle Earth Time:20261103T090000\r\n", "time zone"],
     ["SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nDTEND:20261103T050000Z\r\n", "ends before"],
     ["SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nSTATUS:CANCELLED\r\n", "canceled"],
     ["SUMMARY:a\r\nDTSTART:20261103T060000Z\r\nRECURRENCE-ID:20261103T060000Z\r\n", "changed"],

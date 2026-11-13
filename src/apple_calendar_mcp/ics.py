@@ -10,15 +10,24 @@ events: one-off and simply repeating events, with alarms and removed
 occurrences (EXDATE). Anything it can't represent faithfully is reported as
 skipped with the reason, never imported half-right.
 
+Files from Outlook and Teams name time zones the Windows way ("Turkey
+Standard Time"); those are mapped to IANA zones with CLDR's table. A zone
+the file only defines itself is used when it names an IANA zone
+(X-LIC-LOCATION) or has a single fixed offset. Teams, Zoom, Google Meet and
+Webex join links become the event's URL.
+
 Standard library only, so it works on every backend.
 """
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from functools import cache
+from importlib import resources
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -169,15 +178,130 @@ def _content_line(line: str) -> Prop:
     return name, params, line[i + 1 :]
 
 
-def _vevents(text: str) -> list[tuple[list[Prop], list[list[Prop]]]]:
-    """Each VEVENT as (its properties, the properties of each VALARM)."""
+@dataclass
+class _ZoneDef:
+    """What a file's own VTIMEZONE says about a zone."""
+
+    location: str | None = None  # X-LIC-LOCATION: an IANA name, from some calendar apps
+    offsets: list[tuple[str, str]] = field(default_factory=list)  # (STANDARD/DAYLIGHT, TZOFFSETTO)
+
+
+@cache
+def windows_zones() -> dict[str, str]:
+    """Windows time zone ids (as Outlook writes them) to IANA names, from CLDR."""
+    raw = resources.files("apple_calendar_mcp").joinpath("windows_zones.json").read_text("utf-8")
+    table: dict[str, str] = json.loads(raw)
+    return table
+
+
+def _iana(name: str) -> ZoneInfo | None:
+    try:
+        return ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return None
+
+
+def _fixed(offsets: list[tuple[str, str]]) -> ZoneInfo | None:
+    """A zone with one offset all year, as Etc/GMT±N (whole hours only)."""
+    m = {re.fullmatch(r"([+-])(\d{2})(\d{2})(?:\d{2})?", v.strip()) for _, v in offsets}
+    if len(offsets) == 0 or any(kind != "STANDARD" for kind, _ in offsets) or len(m) != 1:
+        return None
+    (only,) = m
+    if only is None or only.group(3) != "00":
+        return None
+    hours = int(only.group(2))
+    if hours == 0:
+        return ZoneInfo("Etc/UTC")
+    sign = "-" if only.group(1) == "+" else "+"  # Etc/GMT signs are inverted
+    return _iana(f"Etc/GMT{sign}{hours}")
+
+
+def _zone(tzid: str, defined: Mapping[str, _ZoneDef]) -> tzinfo:
+    """The zone a TZID names: IANA, Windows, or the file's own definition."""
+    name = tzid.strip().strip('"').lstrip("/")
+    zone = _iana(name)
+    if zone is None:
+        windows = windows_zones()
+        mapped = windows.get(name) or next(
+            (v for k, v in windows.items() if k.casefold() == name.casefold()), None
+        )
+        zone = _iana(mapped) if mapped else None
+    if zone is None and tzid in defined:
+        own = defined[tzid]
+        zone = (_iana(own.location) if own.location else None) or _fixed(own.offsets)
+    if zone is None:
+        raise _Unsupported(f"its time zone {tzid[:40]!r} isn't one this server knows")
+    return zone
+
+
+_MEETING_PROPS = (
+    "X-MICROSOFT-SKYPETEAMSMEETINGURL",
+    "X-MICROSOFT-ONLINEMEETINGEXTERNALLINK",
+    "X-GOOGLE-CONFERENCE",
+    "CONFERENCE",
+)
+_MEETING_URL = re.compile(
+    r"https://(?:[\w-]+\.)*(?:zoom\.us/(?:j|my|w)/|teams\.microsoft\.com/l/meetup-join/|teams\.live\.com/meet/"
+    r"|meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}|webex\.com/(?:meet|join)/|[\w-]+\.webex\.com/)[^\s<>\"'\]]*",
+    re.IGNORECASE,
+)
+
+
+def meeting_link(*texts: str | None) -> str | None:
+    """The first Teams, Zoom, Google Meet or Webex join link in ``texts``."""
+    for text in texts:
+        m = _MEETING_URL.search(text or "")
+        if m:
+            return m.group(0).rstrip(".,;:)")
+    return None
+
+
+def _vtimezones(text: str) -> dict[str, _ZoneDef]:
+    """The VTIMEZONE definitions in the file, by TZID."""
+    zones: dict[str, _ZoneDef] = {}
+    current: _ZoneDef | None = None
+    tzid: str | None = None
+    part: str | None = None
+    for line in _unfold(text):
+        try:
+            name, _, value = _content_line(line)
+        except ValueError:
+            continue
+        kind = value.strip().upper()
+        if name == "BEGIN" and kind == "VTIMEZONE":
+            current, tzid = _ZoneDef(), None
+        elif name == "END" and kind == "VTIMEZONE":
+            if current is not None and tzid:
+                zones[tzid] = current
+            current = None
+        elif current is None:
+            continue
+        elif name == "BEGIN" and kind in ("STANDARD", "DAYLIGHT"):
+            part = kind
+        elif name == "END" and kind in ("STANDARD", "DAYLIGHT"):
+            part = None
+        elif name == "TZID" and part is None:
+            tzid = value.strip()
+        elif name == "X-LIC-LOCATION" and part is None:
+            current.location = value.strip()
+        elif name == "TZOFFSETTO" and part is not None:
+            current.offsets.append((part, value))
+    return zones
+
+
+def _unfold(text: str) -> list[str]:
     lines: list[str] = []
     for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if raw[:1] in (" ", "\t") and lines:
             lines[-1] += raw[1:]
         elif raw.strip():
             lines.append(raw)
+    return lines
 
+
+def _vevents(text: str) -> list[tuple[list[Prop], list[list[Prop]]]]:
+    """Each VEVENT as (its properties, the properties of each VALARM)."""
+    lines = _unfold(text)
     found: list[tuple[list[Prop], list[list[Prop]]]] = []
     stack: list[str] = []
     saw_calendar = False
@@ -211,7 +335,9 @@ def _vevents(text: str) -> list[tuple[list[Prop], list[list[Prop]]]]:
     return found
 
 
-def _when(params: dict[str, str], value: str, tz: tzinfo) -> tuple[datetime, bool]:
+def _when(
+    params: dict[str, str], value: str, tz: tzinfo, defined: Mapping[str, _ZoneDef] | None = None
+) -> tuple[datetime, bool]:
     """A DATE or DATE-TIME value as an aware datetime in ``tz``, and whether it was a date."""
     v = value.strip()
     try:
@@ -225,11 +351,7 @@ def _when(params: dict[str, str], value: str, tz: tzinfo) -> tuple[datetime, boo
     tzid = params.get("TZID")
     if not tzid:
         return naive.replace(tzinfo=tz), False  # floating: the user's own zone
-    try:
-        zone = ZoneInfo(tzid.lstrip("/"))
-    except (KeyError, ValueError, OSError):
-        raise _Unsupported(f"its time zone {tzid[:40]!r} isn't a standard zone name") from None
-    return naive.replace(tzinfo=zone).astimezone(tz), False
+    return naive.replace(tzinfo=_zone(tzid, defined or {})).astimezone(tz), False
 
 
 def _duration(value: str) -> timedelta | None:
@@ -282,7 +404,9 @@ def _rule(value: str, start: datetime, tz: tzinfo) -> Recurrence:
         raise _Unsupported(f"its repeat rule isn't valid ({exc.errors()[0]['msg']})") from None
 
 
-def _event(props: list[Prop], alarms: list[list[Prop]], tz: tzinfo) -> IcsEvent:
+def _event(
+    props: list[Prop], alarms: list[list[Prop]], tz: tzinfo, defined: Mapping[str, _ZoneDef]
+) -> IcsEvent:
     first: dict[str, tuple[dict[str, str], str]] = {}
     for name, params, value in props:
         first.setdefault(name, (params, value))
@@ -300,9 +424,9 @@ def _event(props: list[Prop], alarms: list[list[Prop]], tz: tzinfo) -> IcsEvent:
     if "DTSTART" not in first:
         raise _Unsupported("it has no start time")
 
-    start, all_day = _when(*first["DTSTART"], tz)
+    start, all_day = _when(*first["DTSTART"], tz, defined)
     if "DTEND" in first:
-        end, _ = _when(*first["DTEND"], tz)
+        end, _ = _when(*first["DTEND"], tz, defined)
     elif "DURATION" in first:
         span = _duration(first["DURATION"][1])
         if span is None:
@@ -320,7 +444,7 @@ def _event(props: list[Prop], alarms: list[list[Prop]], tz: tzinfo) -> IcsEvent:
     if recurrence is not None:
         for name, params, value in props:
             if name == "EXDATE":
-                exdates += [_when(params, v, tz)[0] for v in value.split(",") if v.strip()]
+                exdates += [_when(params, v, tz, defined)[0] for v in value.split(",") if v.strip()]
         if start in exdates:
             raise _Unsupported("its first occurrence was removed, which isn't supported")
 
@@ -333,14 +457,21 @@ def _event(props: list[Prop], alarms: list[list[Prop]], tz: tzinfo) -> IcsEvent:
         if before is not None and before <= timedelta(0):
             minutes.add(int(-before.total_seconds() // 60))
 
+    notes, url = text("DESCRIPTION"), text("URL")
+    join = meeting_link(*(text(p) for p in _MEETING_PROPS), url, text("LOCATION"), notes)
+    if join and not url:
+        url = join
+    elif join and join != url and join not in (notes or ""):
+        notes = f"Join: {join}" + (f"\n\n{notes}" if notes else "")
+
     return IcsEvent(
         title=text("SUMMARY") or "",
         start=start,
         end=end,
         all_day=all_day,
         location=text("LOCATION"),
-        notes=text("DESCRIPTION"),
-        url=text("URL"),
+        notes=notes,
+        url=url,
         alarms=sorted(minutes, reverse=True),
         recurrence=recurrence,
         availability="free" if first.get("TRANSP", ({}, ""))[1].strip().upper() == "TRANSPARENT" else None,
@@ -356,10 +487,12 @@ def parse_ics(text: str, tz: tzinfo) -> tuple[list[IcsEvent], list[IcsSkip]]:
     """
     events: list[IcsEvent] = []
     skipped: list[IcsSkip] = []
-    for props, alarms in _vevents(text):
+    found = _vevents(text)
+    defined = _vtimezones(text)
+    for props, alarms in found:
         title = next((_unescape(v).strip() for n, _, v in props if n == "SUMMARY"), "") or "(no title)"
         try:
-            events.append(_event(props, alarms, tz))
+            events.append(_event(props, alarms, tz, defined))
         except _Unsupported as exc:
             skipped.append(IcsSkip(title=title[:200], reason=f"Skipped: {exc}."))
     return events, skipped
