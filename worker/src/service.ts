@@ -55,6 +55,7 @@ import {
   CalendarError,
   InvalidRequestError,
   NotFoundError,
+  ReadOnlyCalendarError,
   makeEventId,
   splitEventId,
 } from "./store";
@@ -174,8 +175,66 @@ export type BatchChange =
   | { action: "delete"; event_id: string };
 
 export interface BatchResult {
-  change_id: string;
+  /** Null for a dry run. */
+  change_id: string | null;
+  /** True if nothing was written: results are a preview. */
+  dry_run: boolean;
   results: { action: Step["action"]; event: Event }[];
+}
+
+// ------------------------------------------------------------ dry-run previews
+function targetIn(cals: Calendar[], calendarId: string | null): Calendar {
+  const cal = calendarId === null ? cals.find((c) => c.is_default) : cals.find((c) => c.id === calendarId);
+  if (!cal) {
+    if (calendarId === null) throw new InvalidRequestError("There is no default calendar; pass calendar_id.");
+    throw new NotFoundError(`No calendar with id '${calendarId}'. Call list_calendars.`);
+  }
+  if (!cal.writable) throw new ReadOnlyCalendarError(`The calendar '${cal.title}' is read-only.`);
+  return cal;
+}
+
+function previewCreated(d: EventDraft, cal: Calendar): Event {
+  return {
+    id: "",
+    calendar_id: cal.id,
+    calendar_title: cal.title,
+    title: d.title,
+    start: d.start,
+    end: d.end,
+    all_day: d.all_day,
+    location: d.location || null,
+    notes: d.notes || null,
+    url: d.url || null,
+    is_recurring: d.recurrence !== null,
+    recurrence: d.recurrence,
+    alarms_minutes_before: [...d.alarms_minutes_before],
+    availability: d.availability ?? "busy",
+    status: "none",
+    organizer: null,
+    attendees: [],
+    my_status: null,
+  };
+}
+
+function previewUpdated(before: Event, p: EventPatch, cals: Calendar[]): Event {
+  const out: Event = { ...before };
+  if (p.title != null) out.title = p.title;
+  if (p.start != null) out.start = p.start;
+  if (p.end != null) out.end = p.end;
+  if (p.all_day != null) out.all_day = p.all_day;
+  for (const f of ["location", "notes", "url"] as const) {
+    const v = p[f];
+    if (v != null) out[f] = v || null;
+  }
+  if (p.alarms_minutes_before != null) out.alarms_minutes_before = [...p.alarms_minutes_before];
+  if (p.availability != null) out.availability = p.availability;
+  if (p.recurrence != null) out.recurrence = p.recurrence;
+  if (p.remove_recurrence) Object.assign(out, { recurrence: null, is_recurring: false });
+  if (p.calendar_id != null) {
+    const cal = targetIn(cals, p.calendar_id);
+    Object.assign(out, { calendar_id: cal.id, calendar_title: cal.title });
+  }
+  return out;
 }
 
 /** Rethrow a domain error with context, keeping its type. */
@@ -737,7 +796,12 @@ export class CalendarService {
   }
 
   /** Add the events in iCalendar text, as one undoable change. */
-  async importIcs(ics: string, calendarId: string | null = null, skipExisting = true): Promise<ImportResult> {
+  async importIcs(
+    ics: string,
+    calendarId: string | null = null,
+    skipExisting = true,
+    dryRun = false,
+  ): Promise<ImportResult> {
     if (ics.length > MAX_ICS_CHARS) throw new InvalidRequestError("The iCalendar text is too large; split the file.");
     let items: IcsEvent[];
     let skipped: SkippedItem[];
@@ -782,6 +846,12 @@ export class CalendarService {
       plan = fresh;
     }
 
+    if (dryRun) {
+      const cal = plan.length ? await this.targetCalendar(calendarId) : null;
+      const imported = cal ? plan.map(([, d]) => eventRef(previewCreated(d, cal))) : [];
+      return { change_id: null, dry_run: true, imported, skipped };
+    }
+
     const steps: Step[] = [];
     for (const [item, draft] of plan) {
       try {
@@ -804,7 +874,7 @@ export class CalendarService {
       }
     }
     const rec = steps.length ? await this.recordSteps(steps) : null;
-    return { change_id: rec?.id ?? null, imported: steps.map((s) => eventRef(stepEvent(s))), skipped };
+    return { change_id: rec?.id ?? null, dry_run: false, imported: steps.map((s) => eventRef(stepEvent(s))), skipped };
   }
 
   // ------------------------------------------------------------ invitations
@@ -842,8 +912,12 @@ export class CalendarService {
     return { change_id: rec.id, summary: rec.summary, restored, removed_ids: removed };
   }
 
-  /** Apply creates, updates and deletes all-or-nothing, as one undoable change. */
-  async applyChanges(changes: BatchChange[]): Promise<BatchResult> {
+  /**
+   * Apply creates, updates and deletes all-or-nothing, as one undoable change.
+   * With ``dryRun`` everything is checked the same way, but nothing is written:
+   * the result shows each event as it would look afterwards.
+   */
+  async applyChanges(changes: BatchChange[], dryRun = false): Promise<BatchResult> {
     if (changes.length < 1 || changes.length > MAX_BATCH) {
       throw new InvalidRequestError(`Pass between 1 and ${MAX_BATCH} changes.`);
     }
@@ -876,6 +950,26 @@ export class CalendarService {
       }
     }
 
+    if (dryRun) {
+      const cals = await this.store.listCalendars();
+      const results: BatchResult["results"] = [];
+      for (const [i, p] of plan.entries()) {
+        try {
+          if (p.action === "create") {
+            results.push({ action: "create", event: previewCreated(p.draft, targetIn(cals, p.draft.calendar_id)) });
+            continue;
+          }
+          const cal = cals.find((c) => c.id === p.before.calendar_id);
+          if (cal && !cal.writable) throw new ReadOnlyCalendarError(`The calendar '${cal.title}' is read-only.`);
+          const event = p.action === "delete" ? p.before : previewUpdated(p.before, p.patch, cals);
+          results.push({ action: p.action, event });
+        } catch (err) {
+          throw withContext(err, `Change ${i + 1} (${p.action}): `, "Nothing was changed.");
+        }
+      }
+      return { change_id: null, dry_run: true, results };
+    }
+
     // 2. Apply in order; on failure, roll back what was done.
     const steps: Step[] = [];
     for (const [i, p] of plan.entries()) {
@@ -898,7 +992,12 @@ export class CalendarService {
       }
     }
     const rec = await this.recordSteps(steps);
-    return { change_id: rec.id, results: steps.map((s) => ({ action: s.action, event: stepEvent(s) })) };
+    return { change_id: rec.id, dry_run: false, results: steps.map((s) => ({ action: s.action, event: stepEvent(s) })) };
+  }
+
+  /** The calendar a new event would go to, checked the way a write would be. */
+  private async targetCalendar(calendarId: string | null): Promise<Calendar> {
+    return targetIn(await this.store.listCalendars(), calendarId);
   }
 
   private async rollback(steps: Step[]): Promise<string[]> {

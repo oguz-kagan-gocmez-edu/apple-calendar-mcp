@@ -286,7 +286,10 @@ class ChangeOutcome(_Model):
 
 
 class BatchResult(_Model):
-    change_id: str = Field(description="Pass to undo_change to undo the whole batch.")
+    change_id: str | None = Field(
+        description="Pass to undo_change to undo the whole batch. None for a dry run."
+    )
+    dry_run: bool = Field(False, description="True if nothing was written: results are a preview.")
     results: list[ChangeOutcome]
 
 
@@ -307,6 +310,9 @@ class SkippedItem(_Model):
 class ImportResult(_Model):
     change_id: str | None = Field(
         description="Pass to undo_change to remove everything this import added. None if nothing was added."
+    )
+    dry_run: bool = Field(
+        False, description="True if nothing was written: 'imported' lists what would be added (no ids)."
     )
     imported: list[EventRef]
     skipped: list[SkippedItem] = Field(description="Events left out, each with the reason.")

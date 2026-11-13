@@ -1,6 +1,7 @@
 /** Change log, undo_change and apply_changes (port of tests/test_changes.py), on CalDAV/Radicale. */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { AccessControlledStore, AccessPolicy } from "../../src/access";
 import { INVITE_DELETE, KvJournal, type KvLike, stepBlocker } from "../../src/changes";
 import { MemoryStore } from "../../src/memory-store";
 import type { Event, EventDraft, EventPatch, Span } from "../../src/models";
@@ -116,6 +117,47 @@ describe("batch", () => {
     await service.undoChange(r.change_id);
     const evs = (await service.listEvents("2026-11-01", "2026-11-30")).events;
     expect(evs.map((e) => [e.title, e.start])).toEqual([["Standup", at(3, 9)], ["Old sync", at(3, 11)]]);
+  });
+
+  it("previews a batch without writing anything", async () => {
+    const keep = await service.createEvent({ title: "Standup", start: "2026-11-03T09:00", location: "Room 1" });
+    const drop = await service.createEvent({ title: "Old sync", start: "2026-11-03T11:00" });
+    const before = await service.listChanges();
+    const r = await service.applyChanges(
+      [
+        { action: "create", title: "Review", start: "2026-11-03T14:00", calendar_id: "work" },
+        { action: "update", event_id: keep.id, start: "2026-11-03T09:30", location: "" },
+        { action: "delete", event_id: drop.id },
+      ],
+      true,
+    );
+    expect([r.dry_run, r.change_id]).toEqual([true, null]);
+    const [created, moved, deleted] = r.results.map((o) => o.event);
+    expect([created!.id, created!.calendar_id, created!.end]).toEqual(["", "work", at(3, 15)]);
+    expect([moved!.id, moved!.start, moved!.end, moved!.location]).toEqual([keep.id, at(3, 9, 30), at(3, 10, 30), null]);
+    expect(deleted!.id).toBe(drop.id);
+    expect(await titles()).toEqual(["Standup", "Old sync"]);
+    expect(await service.listChanges()).toEqual(before);
+    const first = (await service.listEvents("2026-11-01", "2026-11-30")).events[0]!;
+    expect([first.start, first.location]).toEqual([at(3, 9), "Room 1"]);
+  });
+
+  it("refuses in a dry run what the write would refuse", async () => {
+    const e = await service.createEvent({ title: "X", start: "2026-11-03T09:00" });
+    await expect(
+      service.applyChanges(
+        [
+          { action: "create", title: "A", start: "2026-11-03T10:00" },
+          { action: "update", event_id: e.id, calendar_id: "nowhere" },
+        ],
+        true,
+      ),
+    ).rejects.toThrow(/Change 2 \(update\).*nowhere.*Nothing was changed/);
+    const store = new AccessControlledStore(new MemoryStore(), AccessPolicy.parse("work", "", ""));
+    const locked = new CalendarService(store, IST, () => NOW);
+    const create = { action: "create", title: "A", start: "2026-11-03T10:00", calendar_id: "work" } as const;
+    await expect(locked.applyChanges([create], true)).rejects.toThrow(/Change 1 \(create\).*read-only/);
+    expect(await titles()).toEqual(["X"]);
   });
 
   it("changes nothing when an item is invalid", async () => {

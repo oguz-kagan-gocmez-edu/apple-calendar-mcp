@@ -233,6 +233,8 @@ export interface SkippedItem {
 export interface ImportResult {
   /** Null if nothing was added. */
   change_id: string | null;
+  /** True if nothing was written: ``imported`` lists what would be added (no ids). */
+  dry_run: boolean;
   imported: EventRef[];
   skipped: SkippedItem[];
 }

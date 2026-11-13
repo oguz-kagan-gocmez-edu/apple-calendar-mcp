@@ -14,7 +14,7 @@ from apple_calendar_mcp.changes import INVITE_DELETE, ChangeJournal, Step
 from apple_calendar_mcp.memory_store import MemoryStore
 from apple_calendar_mcp.models import Attendee, BatchChange, Event, EventDraft, EventPatch, Recurrence, Span
 from apple_calendar_mcp.service import CalendarService
-from apple_calendar_mcp.store import BackendError, InvalidRequestError, NotFoundError
+from apple_calendar_mcp.store import BackendError, InvalidRequestError, NotFoundError, ReadOnlyCalendarError
 
 from .conftest import IST, NOW
 
@@ -168,6 +168,55 @@ class TestBatch:
         service.undo_change(r.change_id)
         evs = service.list_events("2026-11-01", "2026-11-30").events
         assert [(e.title, e.start) for e in evs] == [("Standup", at(3, 9)), ("Old sync", at(3, 11))]
+
+    def test_dry_run_previews_without_writing(self, service: CalendarService) -> None:
+        keep = service.create_event("Standup", "2026-11-03T09:00", location="Room 1")
+        drop = service.create_event("Old sync", "2026-11-03T11:00")
+        before = service.list_changes()
+        r = service.apply_changes(
+            batch(
+                {"action": "create", "title": "Review", "start": "2026-11-03T14:00", "calendar_id": "work"},
+                {"action": "update", "event_id": keep.id, "start": "2026-11-03T09:30", "location": ""},
+                {"action": "delete", "event_id": drop.id},
+            ),
+            dry_run=True,
+        )
+        assert r.dry_run and r.change_id is None
+        created, moved, deleted = (o.event for o in r.results)
+        assert (created.id, created.title, created.calendar_id, created.end) == (
+            "",
+            "Review",
+            "work",
+            at(3, 15),
+        )
+        assert (moved.id, moved.start, moved.end, moved.location) == (
+            keep.id,
+            at(3, 9, 30),
+            at(3, 10, 30),
+            None,
+        )
+        assert deleted.id == drop.id
+        assert titles(service) == ["Standup", "Old sync"] and service.list_changes() == before
+        evs = service.list_events("2026-11-01", "2026-11-30").events
+        assert (evs[0].start, evs[0].location) == (at(3, 9), "Room 1")
+
+    def test_dry_run_catches_what_the_write_would_refuse(self, service: CalendarService) -> None:
+        e = service.create_event("X", "2026-11-03T09:00")
+        with pytest.raises(NotFoundError, match=r"Change 2 \(update\).*nowhere"):
+            service.apply_changes(
+                batch(
+                    {"action": "create", "title": "A", "start": "2026-11-03T10:00"},
+                    {"action": "update", "event_id": e.id, "calendar_id": "nowhere"},
+                ),
+                dry_run=True,
+            )
+        for cal in (c for c in service.list_calendars() if not c.writable):  # backends that have one
+            with pytest.raises(ReadOnlyCalendarError, match=r"Change 1 \(create\).*read-only"):
+                service.apply_changes(
+                    batch({"action": "create", "title": "A", "start": "2026-11-03", "calendar_id": cal.id}),
+                    dry_run=True,
+                )
+        assert titles(service) == ["X"]
 
     def test_invalid_item_changes_nothing(self, service: CalendarService) -> None:
         with pytest.raises(InvalidRequestError, match=r"Change 2 \(create\).*Nothing was changed"):

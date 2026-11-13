@@ -38,12 +38,12 @@ Claude: ▸ agenda
 | `calendar_stats` | Where the time goes in a range: busy time per day and weekday, in and out of working hours, per calendar, and the titles that take the most time | read |
 | `find_duplicates` | Events that look like copies of each other (same title, start and end), across calendars; copied repeating series come back as one group | read |
 | `export_ics` | A date range as iCalendar (.ics) text, to share or move to another app; repeating events come out as one event per occurrence | read |
-| `import_ics` | Add the events from .ics text, skipping ones already in the calendar; the whole import is one undoable change, and anything it can't represent exactly is listed with the reason | write |
+| `import_ics` | Add the events from .ics text, skipping ones already in the calendar; the whole import is one undoable change, and anything it can't represent exactly is listed with the reason. `dry_run` previews it first | write |
 | `find_free_slots` | Gaps of at least *N* minutes within working hours, with an optional buffer around other events, skipping weekends if you want | read |
 | `create_event` | Timed or all-day events, with alarms, URL and repeat rules | write |
 | `update_event` | Partial edits. Recurring events take `span`: `this`, `future` or `all` | write |
 | `delete_event` | Delete one occurrence, this and later ones, or the whole series | destructive |
-| `apply_changes` | Up to 25 creates, updates and deletes in one go, all-or-nothing: everything is checked first, and a failure part-way rolls back the rest | destructive |
+| `apply_changes` | Up to 25 creates, updates and deletes in one go, all-or-nothing: everything is checked first, and a failure part-way rolls back the rest. `dry_run` shows the result without changing anything | destructive |
 | `undo_change` | Undo the latest change (or one picked from `list_changes`), including a whole batch | destructive |
 | `list_changes` | Recent changes made through the server, and whether each can be undone | read |
 | `respond_to_invitation` | Accept, decline or tentatively accept an invitation, for the whole series or one occurrence (iCloud/CalDAV backend only) | write |
