@@ -302,3 +302,95 @@ class TestFreeSlotsBufferAndDeclined:
     def test_buffer_out_of_range(self, service: CalendarService) -> None:
         with pytest.raises(InvalidRequestError):
             service.find_free_slots("2026-11-03", "2026-11-03", 60, buffer_minutes=241)
+
+
+class TestDuplicates:
+    def test_groups_and_limit(self, service: CalendarService) -> None:
+        service.create_event("Dentist", "2026-11-04T15:00")
+        service.create_event("Dentist", "2026-11-04T15:00", calendar_id="work")
+        service.create_event("Trip", "2026-11-06", all_day=True)
+        service.create_event("trip", "2026-11-06", all_day=True)
+        service.create_event("Trip", "2026-11-07", all_day=True)
+        r = service.find_duplicates("2026-11-01", "2026-11-30")
+        assert (r.count, r.truncated) == (2, False)
+        assert [(g.title.lower(), g.all_day, g.repeats, len(g.events)) for g in r.groups] == [
+            ("dentist", False, 1, 2),
+            ("trip", True, 1, 2),
+        ]
+        assert [e.calendar_title for e in r.groups[0].events] == ["Home", "Work"]
+        only_work = service.find_duplicates("2026-11-01", "2026-11-30", calendar_ids=["work"])
+        assert only_work.count == 0
+        r = service.find_duplicates("2026-11-01", "2026-11-30", limit=1)
+        assert (r.count, r.truncated, len(r.groups)) == (1, True, 1)
+
+    def test_copied_series(self, service: CalendarService) -> None:
+        rule = Recurrence(frequency="weekly", count=3)
+        a = service.create_event("Lecture", "2026-11-03T10:00", recurrence=rule)
+        b = service.create_event("Lecture", "2026-11-03T10:00", recurrence=rule)
+        (group,) = service.find_duplicates("2026-11-01", "2026-11-30").groups
+        assert group.repeats == 3 and sorted(e.id for e in group.events) == sorted([a.id, b.id])
+        # Deleting one copy clears it.
+        service.delete_event(b.id, Span.ALL)
+        assert service.find_duplicates("2026-11-01", "2026-11-30").count == 0
+
+
+class TestStats:
+    def test_where_the_time_goes(self, service: CalendarService, store: MemoryStore) -> None:
+        # Mon 2 Nov: 9-10 standup+ 9:30-11 review (overlap), evening call 19-20
+        service.create_event("Standup", "2026-11-02T09:00", duration_minutes=60, calendar_id="work")
+        service.create_event("Review", "2026-11-02T09:30", end="2026-11-02T11:00", calendar_id="work")
+        service.create_event("Call home", "2026-11-02T19:00", duration_minutes=60)
+        # Tue 3 Nov: standup again (other case), a free block, a declined invite, an all-day item
+        service.create_event("standup", "2026-11-03T09:00", duration_minutes=30, calendar_id="work")
+        service.create_event("Focus", "2026-11-03T13:00", duration_minutes=120, availability="free")
+        declined = service.create_event("Optional", "2026-11-03T15:00")
+        store.set_my_status(declined.id, "declined")
+        service.create_event("Holiday", "2026-11-04", all_day=True)
+
+        r = service.calendar_stats("2026-11-02", "2026-11-08")
+        assert (r.events, r.timed_events) == (7, 6)
+        assert r.busy_minutes == 120 + 60 + 30
+        assert (r.busy_minutes_in_working_hours, r.busy_minutes_outside_working_hours) == (150, 60)
+        assert r.average_event_minutes == (60 + 90 + 60 + 30) // 4
+        assert [(d.date.day, d.weekday, d.events, d.busy_minutes) for d in r.days] == [
+            (2, "Monday", 3, 180),
+            (3, "Tuesday", 3, 30),
+            (4, "Wednesday", 1, 0),
+            (5, "Thursday", 0, 0),
+            (6, "Friday", 0, 0),
+            (7, "Saturday", 0, 0),
+            (8, "Sunday", 0, 0),
+        ]
+        assert r.busiest_day is not None and r.busiest_day.date.day == 2
+        assert [(w.weekday, w.days, w.busy_minutes) for w in r.by_weekday][:2] == [
+            ("Monday", 1, 180),
+            ("Tuesday", 1, 30),
+        ]
+        assert [(c.calendar_id, c.events, c.minutes) for c in r.by_calendar] == [
+            ("work", 3, 180),
+            ("home", 4, 60),
+        ]
+        assert [(t.title, t.events, t.minutes) for t in r.top_titles] == [
+            ("Standup", 2, 90),  # same time as Review: more events first
+            ("Review", 1, 90),
+            ("Call home", 1, 60),
+        ]
+
+    def test_clips_to_the_range_and_handles_quiet_ranges(self, service: CalendarService) -> None:
+        service.create_event("Overnight", "2026-11-02T22:00", end="2026-11-03T02:00")
+        r = service.calendar_stats("2026-11-03", "2026-11-03")
+        assert (r.busy_minutes, r.top_titles[0].minutes, len(r.days)) == (120, 120, 1)
+        quiet = service.calendar_stats("2026-11-10", "2026-11-11")
+        assert (quiet.events, quiet.busy_minutes, quiet.busiest_day, quiet.average_event_minutes) == (
+            0,
+            0,
+            None,
+            0,
+        )
+        avg = service.calendar_stats("2026-11-02", "2026-11-15")
+        monday = next(w for w in avg.by_weekday if w.weekday == "Monday")
+        assert (monday.days, monday.busy_minutes, monday.average_busy_minutes) == (2, 120, 60)
+
+    def test_rejects_bad_hours(self, service: CalendarService) -> None:
+        with pytest.raises(InvalidRequestError):
+            service.calendar_stats("2026-11-02", "2026-11-08", working_hours_start="9am")

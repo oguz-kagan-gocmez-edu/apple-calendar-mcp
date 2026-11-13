@@ -155,6 +155,88 @@ export interface ConflictResult {
   conflicts: Conflict[];
 }
 
+export interface DayStats {
+  /** YYYY-MM-DD */
+  date: string;
+  weekday: string;
+  events: number;
+  busy_minutes: number;
+}
+
+export interface WeekdayStats {
+  weekday: string;
+  days: number;
+  busy_minutes: number;
+  average_busy_minutes: number;
+}
+
+export interface CalendarUsage {
+  calendar_id: string;
+  calendar_title: string;
+  events: number;
+  minutes: number;
+}
+
+export interface TitleUsage {
+  title: string;
+  events: number;
+  minutes: number;
+}
+
+export interface CalendarStats {
+  range_start: number;
+  range_end: number;
+  events: number;
+  timed_events: number;
+  busy_minutes: number;
+  busy_minutes_in_working_hours: number;
+  busy_minutes_outside_working_hours: number;
+  average_event_minutes: number;
+  busiest_day: DayStats | null;
+  days: DayStats[];
+  by_weekday: WeekdayStats[];
+  by_calendar: CalendarUsage[];
+  top_titles: TitleUsage[];
+}
+
+export interface DuplicateGroup {
+  title: string;
+  start: number;
+  end: number;
+  all_day: boolean;
+  /** 1 for one-off copies; more when repeating series share that many occurrences. */
+  repeats: number;
+  events: EventRef[];
+}
+
+export interface DuplicateResult {
+  range_start: number;
+  range_end: number;
+  count: number;
+  truncated: boolean;
+  groups: DuplicateGroup[];
+}
+
+export interface IcsExport {
+  range_start: number;
+  range_end: number;
+  count: number;
+  truncated: boolean;
+  ics: string;
+}
+
+export interface SkippedItem {
+  title: string;
+  reason: string;
+}
+
+export interface ImportResult {
+  /** Null if nothing was added. */
+  change_id: string | null;
+  imported: EventRef[];
+  skipped: SkippedItem[];
+}
+
 export interface Agenda {
   range_start: number;
   range_end: number;

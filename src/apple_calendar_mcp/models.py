@@ -148,6 +148,76 @@ class ConflictResult(_Model):
     conflicts: list[Conflict]
 
 
+class DayStats(_Model):
+    date: date
+    weekday: str
+    events: int = Field(description="Events on the day (all-day ones included, canceled ones not).")
+    busy_minutes: int = Field(description="Time blocked by timed events, overlaps counted once.")
+
+
+class WeekdayStats(_Model):
+    weekday: str
+    days: int = Field(description="How many of this weekday fall in the range.")
+    busy_minutes: int
+    average_busy_minutes: int
+
+
+class CalendarUsage(_Model):
+    calendar_id: str
+    calendar_title: str
+    events: int
+    minutes: int = Field(description="Sum of the durations of its timed events that take time.")
+
+
+class TitleUsage(_Model):
+    title: str
+    events: int
+    minutes: int
+
+
+class CalendarStats(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    events: int = Field(description="Events in the range (all-day included, canceled left out).")
+    timed_events: int
+    busy_minutes: int = Field(
+        description="Time blocked by timed events, overlaps counted once. Skips events marked 'free' "
+        "and invitations you declined."
+    )
+    busy_minutes_in_working_hours: int
+    busy_minutes_outside_working_hours: int
+    average_event_minutes: int = Field(description="Average length of timed events that take time.")
+    busiest_day: DayStats | None
+    days: list[DayStats]
+    by_weekday: list[WeekdayStats]
+    by_calendar: list[CalendarUsage] = Field(description="Most minutes first.")
+    top_titles: list[TitleUsage] = Field(
+        description="Up to 10 titles that take the most time (case ignored), e.g. recurring meetings."
+    )
+
+
+class DuplicateGroup(_Model):
+    title: str
+    start: datetime
+    end: datetime
+    all_day: bool = False
+    repeats: int = Field(
+        description="1 for one-off copies. More: the copies are repeating series that share this "
+        "many occurrences in the range; 'events' holds the first one of each."
+    )
+    events: list[EventRef] = Field(description="The copies. Keep one; the others are the extras.")
+
+
+class DuplicateResult(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    count: int
+    truncated: bool
+    groups: list[DuplicateGroup]
+
+
 class EventList(_Model):
     timezone: str
     range_start: datetime
@@ -220,11 +290,100 @@ class BatchResult(_Model):
     results: list[ChangeOutcome]
 
 
+class IcsExport(_Model):
+    timezone: str
+    range_start: datetime
+    range_end: datetime
+    count: int
+    truncated: bool = Field(description="True if the range held more events than were exported.")
+    ics: str = Field(description="iCalendar text; save it as a .ics file.")
+
+
+class SkippedItem(_Model):
+    title: str
+    reason: str
+
+
+class ImportResult(_Model):
+    change_id: str | None = Field(
+        description="Pass to undo_change to remove everything this import added. None if nothing was added."
+    )
+    imported: list[EventRef]
+    skipped: list[SkippedItem] = Field(description="Events left out, each with the reason.")
+
+
 class TimeContext(_Model):
     now: datetime
     timezone: str
     weekday: str
     iso_week: int
+
+
+# ---------------------------------------------------------------- reminders
+Priority = Literal["none", "high", "medium", "low"]
+ReminderStatus = Literal["open", "completed", "all"]
+
+
+class ReminderList(_Model):
+    id: str
+    title: str
+    source: str | None = None
+    color: str | None = None
+    writable: bool
+    is_default: bool = False
+
+
+class Reminder(_Model):
+    id: str = Field(description="Opaque id. Pass it to update/complete/delete.")
+    list_id: str
+    list_title: str
+    title: str
+    notes: str | None = None
+    due: datetime | None = Field(None, description="When it is due; for a date-only due, local midnight.")
+    due_all_day: bool = Field(False, description="True when the due has a date but no time.")
+    overdue: bool = False
+    priority: Priority = "none"
+    completed: bool = False
+    completed_at: datetime | None = None
+    is_recurring: bool = Field(False, description="Repeats (read-only here; edit the rule in Reminders).")
+
+
+class ReminderResult(_Model):
+    timezone: str
+    count: int
+    truncated: bool
+    reminders: list[Reminder]
+
+
+class ReminderDeleted(_Model):
+    deleted: bool
+    reminder_id: str
+    title: str
+
+
+class ReminderDraft(_Model):
+    title: str
+    list_id: str | None = None
+    notes: str | None = None
+    due: datetime | None = None
+    due_all_day: bool = False
+    priority: Priority = "none"
+
+
+class ReminderPatch(_Model):
+    """Partial update. ``None`` means 'leave unchanged'; for notes '' clears."""
+
+    title: str | None = None
+    list_id: str | None = None
+    notes: str | None = None
+    due: datetime | None = None
+    due_all_day: bool = False
+    clear_due: bool = False
+    priority: Priority | None = None
+    completed: bool | None = None
+
+    def is_empty(self) -> bool:
+        return not self.model_dump(exclude_defaults=True)
 
 
 # ---------------------------------------------------------------- write models

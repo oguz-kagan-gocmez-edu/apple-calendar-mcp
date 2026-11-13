@@ -19,6 +19,9 @@ READ_TOOLS = {
     "find_free_slots",
     "agenda",
     "find_conflicts",
+    "find_duplicates",
+    "calendar_stats",
+    "export_ics",
 }
 WRITE_TOOLS = {
     "create_event",
@@ -28,6 +31,7 @@ WRITE_TOOLS = {
     "undo_change",
     "list_changes",
     "respond_to_invitation",
+    "import_ics",
 }
 
 
@@ -160,3 +164,23 @@ async def test_batch_and_undo(service: CalendarService) -> None:
         assert listed["count"] == 0
         res = await client.call_tool("apply_changes", {"changes": [{"action": "explode"}]})
         assert res.is_error
+
+
+async def test_find_duplicates(service: CalendarService) -> None:
+    service.create_event("Dentist", "2026-11-04T15:00")
+    service.create_event("dentist ", "2026-11-04T15:00", calendar_id="work")
+    service.create_event("Dentist", "2026-11-05T15:00")
+    async with Client(build_server(service)) as client:
+        r = await call(client, "find_duplicates", {"start": "2026-11-01", "end": "2026-11-30"})
+    assert r["count"] == 1 and not r["truncated"]
+    (group,) = r["groups"]
+    assert group["start"] == "2026-11-04T15:00:00+03:00" and group["repeats"] == 1
+    assert [e["calendar_title"] for e in group["events"]] == ["Home", "Work"]
+
+
+async def test_calendar_stats(service: CalendarService) -> None:
+    service.create_event("Lecture", "2026-11-02T10:00", end="2026-11-02T12:00")
+    async with Client(build_server(service)) as client:
+        r = await call(client, "calendar_stats", {"start": "2026-11-02", "end": "2026-11-08"})
+    assert r["busy_minutes"] == 120 and r["busiest_day"]["date"] == "2026-11-02"
+    assert r["days"][0]["weekday"] == "Monday" and len(r["days"]) == 7

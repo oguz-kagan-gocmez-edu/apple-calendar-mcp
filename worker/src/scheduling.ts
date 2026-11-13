@@ -12,6 +12,7 @@
  */
 
 import type { Event, FreeSlot } from "./models";
+import { splitEventId } from "./store";
 import { type Zone, addDays, at, compareDates, weekday, MINUTE } from "./time";
 
 export type Interval = [number, number];
@@ -40,6 +41,52 @@ export function findConflicts(events: Iterable<Event>): ConflictPair[] {
     active.push(e);
   }
   return found;
+}
+
+/** What two events must share to count as copies (title: case and spacing ignored). */
+export function duplicateKey(title: string, start: number, end: number, allDay: boolean): string {
+  return JSON.stringify([title.toLowerCase().split(/\s+/).filter(Boolean).join(" "), start, end, allDay]);
+}
+
+/**
+ * Events that look like copies of each other: ``[copies, repeats]`` per group.
+ *
+ * Copies share the title (case and spacing ignored), start, end and all-day
+ * flag, and belong to different series. Canceled events are skipped. Two
+ * repeating series that are copies give one group (their first shared
+ * occurrence), and ``repeats`` counts the shared occurrences.
+ */
+export function findDuplicates(events: Iterable<Event>): [Event[], number][] {
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const sorted = [...events].sort(
+    (a, b) => a.start - b.start || a.end - b.end || cmp(a.calendar_title, b.calendar_title) || cmp(a.id, b.id),
+  );
+  const buckets = new Map<string, Map<string, Event>>();
+  for (const e of sorted) {
+    if (e.status === "canceled") continue;
+    const key = duplicateKey(e.title, e.start, e.end, e.all_day);
+    let bySeries = buckets.get(key);
+    if (!bySeries) buckets.set(key, (bySeries = new Map()));
+    const series = splitEventId(e.id)[0];
+    if (!bySeries.has(series)) bySeries.set(series, e);
+  }
+  const groups: [Event[], number][] = [];
+  const seriesGroup = new Map<string, number>();
+  for (const bySeries of buckets.values()) {
+    if (bySeries.size < 2) continue;
+    const copies = [...bySeries.values()];
+    if (copies.every((e) => e.is_recurring)) {
+      const pair = JSON.stringify([...bySeries.keys()].sort());
+      const seen = seriesGroup.get(pair);
+      if (seen !== undefined) {
+        groups[seen]![1] += 1;
+        continue;
+      }
+      seriesGroup.set(pair, groups.length);
+    }
+    groups.push([copies, 1]);
+  }
+  return groups;
 }
 
 /** Milliseconds inside ``window`` covered by blocking timed events, overlaps counted once. */

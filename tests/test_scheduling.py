@@ -7,6 +7,7 @@ from apple_calendar_mcp.models import Event
 from apple_calendar_mcp.scheduling import (
     busy_time,
     find_conflicts,
+    find_duplicates,
     find_free_slots,
     merge_intervals,
     subtract,
@@ -156,3 +157,45 @@ def test_busy_time_counts_overlaps_once_inside_the_window() -> None:
         named("free", at(2, 14), at(2, 15), availability="free"),
     ]
     assert busy_time(events, (at(2, 9), at(2, 18))) == timedelta(minutes=90)
+
+
+def copy(uid: str, title: str, start: datetime, end: datetime, **kw: object) -> Event:
+    stamp = int(start.timestamp())
+    return Event(
+        id=f"{uid}|{stamp}", calendar_id="c", calendar_title="C", title=title, start=start, end=end, **kw
+    )
+
+
+def test_duplicates_share_title_and_times() -> None:
+    events = [
+        copy("a", "Dentist", at(4, 15), at(4, 16)),
+        copy("b", "  dentist ", at(4, 15), at(4, 16)),  # case and spacing ignored
+        copy("c", "Dentist", at(4, 15), at(4, 17)),  # other end
+        copy("d", "Dentist", at(5, 15), at(5, 16)),  # other day
+        copy("e", "Dentists", at(4, 15), at(4, 16)),  # other title
+        copy("f", "Dentist", at(4, 15), at(4, 16), status="canceled"),
+        copy("g", "Dentist", at(4, 15), at(4, 16), all_day=True),
+    ]
+    assert [([e.id.split("|")[0] for e in copies], n) for copies, n in find_duplicates(events)] == [
+        (["a", "b"], 1)
+    ]
+
+
+def test_occurrences_of_one_series_are_not_duplicates() -> None:
+    events = [copy("a", "Sync", at(4, 15), at(4, 16)), copy("a", "Sync", at(4, 15), at(4, 16))]
+    assert find_duplicates(events) == []
+
+
+def test_duplicated_series_give_one_group() -> None:
+    events = [
+        copy(uid, "Lecture", at(day, 10), at(day, 12), is_recurring=True)
+        for day in (3, 10, 17)
+        for uid in ("a", "b")
+    ]
+    events.append(copy("c", "Lecture", at(10, 10), at(10, 12)))  # a one-off copy of one occurrence
+    found = [([e.id for e in copies], n) for copies, n in find_duplicates(events)]
+    first, second = int(at(3, 10).timestamp()), int(at(10, 10).timestamp())
+    assert found == [
+        ([f"a|{first}", f"b|{first}"], 2),  # 3 Nov and 17 Nov
+        ([f"a|{second}", f"b|{second}", f"c|{second}"], 1),
+    ]
