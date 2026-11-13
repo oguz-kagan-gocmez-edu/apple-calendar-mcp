@@ -1,3 +1,3 @@
 """Apple Calendar MCP server: lets Claude read and manage macOS Calendar via EventKit."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
