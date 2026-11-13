@@ -1,0 +1,10 @@
+# The Claude Desktop extension. Claude Desktop installs these dependencies with uv;
+# the server itself comes from PyPI, so the bundle carries no code of its own.
+[project]
+name = "apple-calendar-mcp-extension"
+version = "0.3.0"
+requires-python = ">=3.11"
+dependencies = ["apple-calendar-eventkit-mcp==0.3.0"]
+
+[tool.uv]
+package = false

@@ -126,6 +126,24 @@ def test_serve_builds_server_with_options(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(calls["store"], MemoryStore)
 
 
+@pytest.mark.parametrize(("value", "expected"), [("true", True), ("1", True), ("false", False), ("", False)])
+def test_read_only_from_the_environment(monkeypatch: pytest.MonkeyPatch, value: str, expected: bool) -> None:
+    seen: dict[str, bool] = {}
+
+    class FakeServer:
+        def run(self, transport: str) -> None:
+            pass
+
+    def fake_build(service: Any, read_only: bool = False) -> FakeServer:
+        seen["read_only"] = read_only
+        return FakeServer()
+
+    monkeypatch.setattr(cli, "build_server", fake_build)
+    monkeypatch.setenv(cli.READ_ONLY_ENV, value)
+    assert cli.main(["--backend", "memory", "--timezone", "UTC"]) == 0
+    assert seen["read_only"] is expected
+
+
 def test_doctor_off_macos(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     assert cli.main(["doctor", "--timezone", "UTC"]) == 1

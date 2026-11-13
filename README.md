@@ -103,6 +103,16 @@ flowchart LR
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Claude Desktop or Claude Code
 
+## Claude Desktop extension (one click)
+
+The easiest way to use it in **Claude Desktop**: no terminal, no config file.
+
+1. Download `apple-calendar-mcp-<version>.mcpb` from the [latest release](https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp/releases/latest).
+2. Double-click it (or drag it onto Claude Desktop's **Settings → Extensions**) and click **Install**.
+3. Ask Claude something like *"what's on my calendar this week?"*. macOS asks once for access to **"Apple Calendar MCP"**: choose **Allow Full Access** for Calendar and, if you use them, Reminders.
+
+The extension's settings page has the same options as the command line: read-only mode, read-only, hidden or only-these calendars, and leaving out Reminders. Claude Desktop installs the server from PyPI with uv. On first start the extension writes the helper app to `~/Applications/Apple Calendar MCP.app` (see [macOS permissions](#macos-permissions-read-this-if-nothing-works)), and it updates the helper only when a new version changes it.
+
 ## Claude plugin
 
 The quickest way to use it in **Claude Code** (and in **Cowork** sessions that run on your Mac) is the plugin. It adds the server and a short skill that teaches Claude the workflow and the one-time permission setup. Install it in Claude Code:
@@ -374,6 +384,10 @@ The test suite has six layers:
 The Cloudflare Worker has its own TypeScript suite (`cd worker && npm test`): the same service scenarios against Radicale, recurrence and DST checks, a CPU budget check (the free plan allows 10 ms of CPU per request), and the OAuth flow and MCP tools inside `workerd`, the real Workers runtime.
 
 CI runs on Ubuntu (Python 3.11–3.13) and macOS. The macOS job also imports the real PyObjC bindings and builds and signs the helper app. A Docker job builds the remote-connector image and checks it starts and requires a token. A Worker job type-checks, lints, tests and builds the Cloudflare Worker.
+
+### Building the extension
+
+`scripts/build-mcpb.sh` packs [`mcpb/`](mcpb/) into `dist/apple-calendar-mcp-<version>.mcpb`. The bundle holds only the manifest, a five-line entry point and the icon; it pins the server's PyPI version, so build it after that version is published. The release workflow does this and attaches the file to the GitHub release.
 
 ### Manual check on a Mac
 
