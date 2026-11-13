@@ -1,0 +1,196 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/dist/mcpb-manifest.schema.json",
+  "manifest_version": "0.4",
+  "name": "apple-calendar-mcp",
+  "display_name": "Apple Calendar",
+  "version": "0.3.0",
+  "description": "Read and manage Apple Calendar and Reminders on your Mac: events, free time, conflicts, undo.",
+  "long_description": "Works with every account synced into macOS Calendar (iCloud, Google, Exchange and others) through Apple's EventKit, locally on your Mac. Find free time, check your agenda and conflicts, create and move events (including one occurrence of a repeating event), preview and undo changes, import and export .ics files, and manage reminders.\n\nOn first start it installs a small helper app at ~/Applications/Apple Calendar MCP.app. macOS then asks once for access to \"Apple Calendar MCP\": choose Allow Full Access for Calendar (and for Reminders, if you use them). Nothing leaves your Mac.",
+  "author": {
+    "name": "Oğuz Kağan Göçmez",
+    "url": "https://github.com/oguz-kagan-gocmez-edu"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp"
+  },
+  "homepage": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp",
+  "documentation": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp#readme",
+  "support": "https://github.com/oguz-kagan-gocmez-edu/apple-calendar-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "server.py"
+      ],
+      "env": {
+        "APPLE_CALENDAR_MCP_INSTALL_APP": "1",
+        "APPLE_CALENDAR_READ_ONLY": "${user_config.read_only}",
+        "APPLE_CALENDAR_READ_ONLY_CALENDARS": "${user_config.read_only_calendars}",
+        "APPLE_CALENDAR_HIDDEN_CALENDARS": "${user_config.hidden_calendars}",
+        "APPLE_CALENDAR_ONLY_CALENDARS": "${user_config.only_calendars}",
+        "APPLE_CALENDAR_NO_REMINDERS": "${user_config.no_reminders}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "get_time_context",
+      "description": "Current date, time and time zone, for relative requests like 'next Friday'."
+    },
+    {
+      "name": "list_calendars",
+      "description": "Calendars from every account synced into macOS Calendar."
+    },
+    {
+      "name": "list_events",
+      "description": "Events in a date range, with repeating events expanded."
+    },
+    {
+      "name": "search_events",
+      "description": "Find events by text in the title, location or notes."
+    },
+    {
+      "name": "get_event",
+      "description": "Full details of one event."
+    },
+    {
+      "name": "agenda",
+      "description": "A day's plan: what's next, free time, conflicts and unanswered invitations."
+    },
+    {
+      "name": "find_free_slots",
+      "description": "Free time of a given length, within working hours and with buffers."
+    },
+    {
+      "name": "find_conflicts",
+      "description": "Overlapping events in a range."
+    },
+    {
+      "name": "find_duplicates",
+      "description": "Events that look like copies of each other."
+    },
+    {
+      "name": "calendar_stats",
+      "description": "Where the time goes: busy hours by day, weekday, calendar and title."
+    },
+    {
+      "name": "export_ics",
+      "description": "Events in a range as iCalendar (.ics) text."
+    },
+    {
+      "name": "create_event",
+      "description": "Create an event, optionally repeating, with alerts."
+    },
+    {
+      "name": "update_event",
+      "description": "Change an event, one occurrence, this and later ones, or the whole series."
+    },
+    {
+      "name": "delete_event",
+      "description": "Delete an event or occurrences of a series."
+    },
+    {
+      "name": "apply_changes",
+      "description": "Several creates, updates and deletes at once, all-or-nothing; can preview first."
+    },
+    {
+      "name": "import_ics",
+      "description": "Add the events from .ics text; can preview first."
+    },
+    {
+      "name": "list_changes",
+      "description": "Recent changes made through this extension."
+    },
+    {
+      "name": "undo_change",
+      "description": "Undo a change made through this extension."
+    },
+    {
+      "name": "list_reminder_lists",
+      "description": "Reminder lists."
+    },
+    {
+      "name": "list_reminders",
+      "description": "Reminders, filtered by list, status, due date or text."
+    },
+    {
+      "name": "create_reminder",
+      "description": "Add a reminder with an optional due date and priority."
+    },
+    {
+      "name": "update_reminder",
+      "description": "Change a reminder or move it to another list."
+    },
+    {
+      "name": "complete_reminder",
+      "description": "Mark a reminder done (or not done)."
+    },
+    {
+      "name": "delete_reminder",
+      "description": "Delete a reminder."
+    }
+  ],
+  "tools_generated": true,
+  "user_config": {
+    "read_only": {
+      "type": "boolean",
+      "title": "Read only",
+      "description": "Let Claude read your calendars but never change them.",
+      "default": false,
+      "required": false
+    },
+    "read_only_calendars": {
+      "type": "string",
+      "title": "Read-only calendars",
+      "description": "Comma-separated calendar names Claude may read but not change.",
+      "default": "",
+      "required": false
+    },
+    "hidden_calendars": {
+      "type": "string",
+      "title": "Hidden calendars",
+      "description": "Comma-separated calendar names Claude can't see at all.",
+      "default": "",
+      "required": false
+    },
+    "only_calendars": {
+      "type": "string",
+      "title": "Only these calendars",
+      "description": "Comma-separated calendar names; if set, every other calendar is hidden.",
+      "default": "",
+      "required": false
+    },
+    "no_reminders": {
+      "type": "boolean",
+      "title": "Leave out Reminders",
+      "description": "Don't offer the reminder tools (and don't ask for Reminders access).",
+      "default": false,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "keywords": [
+    "calendar",
+    "apple",
+    "icloud",
+    "eventkit",
+    "reminders",
+    "macos",
+    "scheduling"
+  ],
+  "license": "MIT"
+}

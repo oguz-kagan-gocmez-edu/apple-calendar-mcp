@@ -35,6 +35,9 @@ EXECUTABLE = "apple-calendar-mcp-launcher"
 VIA_APP_ENV = "APPLE_CALENDAR_MCP_VIA_APP"
 # Set to 1 to never use the helper.
 NO_APP_ENV = "APPLE_CALENDAR_MCP_NO_APP"
+# Set to 1 to install (or update) the prebuilt helper on start, as the Claude Desktop
+# extension does: its users never see a terminal to run `install-app` in.
+INSTALL_APP_ENV = "APPLE_CALENDAR_MCP_INSTALL_APP"
 
 USAGE_TEXT = "Lets Claude read and manage your calendar events through the apple-calendar-mcp server."
 REMINDERS_USAGE_TEXT = "Lets Claude read and manage your reminders through the apple-calendar-mcp server."
@@ -188,6 +191,46 @@ def relaunch_command(
 
 def helper_installed(app: Path | None = None) -> bool:
     return os.access(launcher_path(app or default_app_path()), os.X_OK)
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes")
+
+
+def app_is_current(app: Path, prebuilt: Traversable) -> bool:
+    """Whether ``app`` already is what build_app would write from ``prebuilt``."""
+    try:
+        return (app / "Contents" / "Info.plist").read_bytes() == info_plist() and launcher_path(
+            app
+        ).read_bytes() == prebuilt.read_bytes()
+    except OSError:
+        return False
+
+
+def ensure_app(
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    app: Path | None = None,
+    prebuilt: Traversable | None = None,
+    run: Runner = subprocess.run,
+) -> Path | None:
+    """Install or update the prebuilt helper when INSTALL_APP_ENV asks for it.
+
+    Returns the app if it was (re)written. Rewriting re-signs it, which makes macOS ask
+    for access again, so an app that is already current is left alone.
+    """
+    env = os.environ if env is None else env
+    platform = sys.platform if platform is None else platform
+    if platform != "darwin" or not _truthy(env.get(INSTALL_APP_ENV)):
+        return None
+    if env.get(VIA_APP_ENV) or _truthy(env.get(NO_APP_ENV)) or protected_folder() is not None:
+        return None
+    prebuilt = prebuilt or prebuilt_launcher()
+    app = app or default_app_path()
+    if prebuilt is None or app_is_current(app, prebuilt):
+        return None
+    build_app(app, run, prebuilt=prebuilt)
+    return app
 
 
 def unusable_reason() -> str | None:

@@ -203,3 +203,55 @@ def test_unusable_reason_needs_both(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "can't be used" in (macos_app.unusable_reason() or "")
     monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: None)
     assert macos_app.unusable_reason() is None
+
+
+ON = {macos_app.INSTALL_APP_ENV: "1"}
+
+
+class TestEnsureApp:
+    """The Claude Desktop extension installs the helper itself (INSTALL_APP_ENV)."""
+
+    @pytest.fixture
+    def shipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: None)
+        f = tmp_path / "shipped"
+        f.write_bytes(FAKE_MACHO)
+        return f
+
+    def ensure(self, app: Path, shipped: Path, env: dict[str, str], calls: list[Any]) -> Path | None:
+        return macos_app.ensure_app(env, "darwin", app, shipped, run=lambda cmd, check: calls.append(cmd))
+
+    def test_installs_once_then_leaves_it_alone(self, tmp_path: Path, shipped: Path) -> None:
+        app, calls = tmp_path / "A.app", []
+        assert self.ensure(app, shipped, ON, calls) == app
+        assert macos_app.helper_installed(app) and len(calls) == 1
+        assert self.ensure(app, shipped, ON, calls) is None  # re-signing would reset access
+        assert len(calls) == 1
+
+    def test_updates_an_outdated_app(self, tmp_path: Path, shipped: Path) -> None:
+        app, calls = tmp_path / "A.app", []
+        self.ensure(app, shipped, ON, calls)
+        (app / "Contents" / "Info.plist").write_bytes(b"old")  # e.g. before reminders were declared
+        assert self.ensure(app, shipped, ON, calls) == app
+        shipped.write_bytes(FAKE_MACHO[:4] + b"\1" * 60)  # a newer launcher
+        assert self.ensure(app, shipped, ON, calls) == app
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {},
+            {macos_app.INSTALL_APP_ENV: "false"},
+            {**ON, macos_app.NO_APP_ENV: "1"},
+            {**ON, macos_app.VIA_APP_ENV: "1"},
+        ],
+    )
+    def test_only_when_asked(self, tmp_path: Path, shipped: Path, env: dict[str, str]) -> None:
+        calls: list[Any] = []
+        assert self.ensure(tmp_path / "A.app", shipped, env, calls) is None and calls == []
+
+    def test_not_elsewhere(self, tmp_path: Path, shipped: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert macos_app.ensure_app(ON, "linux", tmp_path / "A.app", shipped) is None
+        assert macos_app.ensure_app(ON, "darwin", tmp_path / "A.app") is None  # no prebuilt launcher
+        monkeypatch.setattr(macos_app, "protected_folder", lambda paths=None, home=None: tmp_path)
+        assert macos_app.ensure_app(ON, "darwin", tmp_path / "A.app", shipped) is None

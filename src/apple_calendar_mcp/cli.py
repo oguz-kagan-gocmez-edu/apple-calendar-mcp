@@ -62,12 +62,17 @@ def caldav_store_from_env(tz: tzinfo) -> CalendarStore:
 
 
 NO_REMINDERS_ENV = "APPLE_CALENDAR_NO_REMINDERS"
+READ_ONLY_ENV = "APPLE_CALENDAR_READ_ONLY"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def reminders_enabled(args: argparse.Namespace) -> bool:
     if getattr(args, "no_reminders", False):
         return False
-    return os.environ.get(NO_REMINDERS_ENV, "").strip().lower() not in ("1", "true", "yes")
+    return not _env_flag(NO_REMINDERS_ENV)
 
 
 ACCESS_ENV = {
@@ -228,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
         help="default: caldav for serve-http, eventkit otherwise",
     )
     parser.add_argument("--demo", action="store_true", help="seed the memory backend with sample events")
-    parser.add_argument("--read-only", action="store_true", help="do not expose create/update/delete")
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help=f"do not expose create/update/delete (default: ${READ_ONLY_ENV})",
+    )
     for flag, env in ACCESS_ENV.items():
         what = {
             "read_only_calendars": "calendars Claude may read but not change",
@@ -262,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     real_argv = sys.argv[1:] if argv is None else list(argv)
     args = parser.parse_args(real_argv)
+    args.read_only = args.read_only or _env_flag(READ_ONLY_ENV)
     if args.backend is None:
         args.backend = "caldav" if args.command == "serve-http" else "eventkit"
 
@@ -275,6 +285,11 @@ def main(argv: list[str] | None = None) -> int:
     # Real invocations (not tests) on macOS re-run through the helper app, if
     # installed, so the calendar permission belongs to it.
     if argv is None and args.backend == "eventkit":
+        try:
+            if installed := macos_app.ensure_app():
+                log.warning("installed the helper app at %s; macOS will ask for access", installed)
+        except macos_app.AppBuildError as exc:
+            log.warning("could not install the helper app: %s", exc)
         cmd = macos_app.relaunch_command(real_argv)
         reason = macos_app.unusable_reason()
         if cmd is None and reason is not None and args.command != "doctor":  # doctor says it itself

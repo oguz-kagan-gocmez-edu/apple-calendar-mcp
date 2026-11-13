@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag like v0.2.0 to publish that version to PyPI and then to the
-# MCP Registry. Both use GitHub's OIDC identity, so there are no secrets:
+# MCP Registry, and to attach the Claude Desktop extension (.mcpb) to a GitHub
+# release. PyPI and the registry use GitHub's OIDC identity, so there are no secrets:
 # PyPI trusts this workflow through a "trusted publisher" entry, and the
 # registry trusts it for the io.github.oguz-kagan-gocmez-edu/* namespace.
 
@@ -47,8 +48,10 @@ jobs:
           package="$(sed -nE 's/^__version__ = "(.*)"$/\1/p' src/apple_calendar_mcp/__init__.py)"
           server="$(jq -r .version server.json)"
           server_pkg="$(jq -r '.packages[0].version' server.json)"
-          echo "tag=$tag pyproject=$project __init__=$package server.json=$server/$server_pkg"
-          for v in "$project" "$package" "$server" "$server_pkg"; do
+          bundle="$(jq -r .version mcpb/manifest.json)"
+          bundle_pin="$(sed -nE 's/.*"apple-calendar-eventkit-mcp==([^"]+)".*/\1/p' mcpb/pyproject.toml)"
+          echo "tag=$tag pyproject=$project __init__=$package server.json=$server/$server_pkg mcpb=$bundle/$bundle_pin"
+          for v in "$project" "$package" "$server" "$server_pkg" "$bundle" "$bundle_pin"; do
             [ "$v" = "$tag" ] || { echo "::error::version $v doesn't match tag v$tag"; exit 1; }
           done
 
@@ -125,3 +128,25 @@ jobs:
 
       - run: ./mcp-publisher login github-oidc
       - run: ./mcp-publisher publish
+
+  bundle:
+    name: Attach the Claude Desktop extension
+    needs: pypi # the bundle installs this version from PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload the .mcpb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: scripts/build-mcpb.sh
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          file="dist/apple-calendar-mcp-${GITHUB_REF_NAME#v}.mcpb"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" "$file" --clobber
